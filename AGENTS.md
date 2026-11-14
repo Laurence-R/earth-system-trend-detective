@@ -74,6 +74,20 @@ Skills 來源：上游 `mattpocock/skills` 的 plugin（安裝方式見 `docs/ag
 - 每條序列的原始回應存到 `data/raw/giovanni/<變數>__<地點>.csv`（不進 git），之後建 SQLite 的來源表用（#26）。
 - 原始下載檔（AppEEARS bundle 等）在 `data/raw/`，不進 git，見 README「原始資料」。
 
+## 擴充資料（#46）
+核心快照之外的「Giovanni 全球月資料全部變數 × 全球平均與世界各地」。量大（約核心的 50 倍），**不進 git**，放在 `data/extended/`，格式與 `data/snapshot/` 相同（`catalog.json` 加 `series/*.json`），並匯入 SQLite（`tier = 'extended'`）。公開 demo 不讀它。
+
+- **變數清單是產生出來的**：`uv run python -m trend_detective.variable_list`（約 1 分鐘）從 Giovanni 的 `/configured-variables/` 產生 `data/seed/variables.extended.json`。納入與排除哪些產品寫在 `variable_list.py` 的 `PRODUCT_RULES`（改規則就改那裡，不要手改產生的 seed）；沒列在規則裡的產品一律排除並在輸出裡標出。英文名、單位、產品、DOI 來自 `/timeseries` 回應的 metadata，Harmony 的 collection id 與 `data_start`（產品第一筆資料日）來自 CMR。
+- **中文名稱、定義、分類由隊伍寫**：產生時 `name_zh` 暫用英文名、`definition_zh` 空白、`category = "待分類"`、`needs_translation = true`。直接在 `variables.extended.json` 填這幾欄並把 `needs_translation` 改成 `false`；重新產生時這幾欄（與 `note_zh`）會保留。不要自動翻譯後當成定稿。
+- **世界地點**在 `data/seed/locations.world.json`（清單是資料，可以改）：`group` 是 `global`（全球平均，bbox −180, −90, 180, 90）、`world_region`（各洲、北極圈以北、熱帶的簡化方框）、`world_city`（12 個城市點位）。核心的台灣地點仍在 `locations.json`。
+- **抓取**：`uv run python -m trend_detective.extended`（`.env` 要有 `EARTHDATA_TOKEN`）。**預設只抓單點**（Giovanni `/timeseries`，執行緒池，`--point-workers` 預設 8）：2,177 條約 10 分鐘，quota 幾乎不動。階段 a–f 依序是：核心變數 × 全球平均、核心變數 × 世界區域與城市、擴充變數 × 全球平均、× 世界區域、× 世界城市、× 台灣地點；`--stage b e` 只跑指定階段。
+- **不要用 Harmony 做全球或洲尺度的區域平均**（2026-11-14 實測）：送出 21 個全球／洲尺度的 job 後，Giovanni 月 quota 在 25 分鐘內從 0.00007 升到 0.249，而且這些 job 16 分鐘後仍沒有一個完成；單點實測每條只耗 3e-9（月資料）至 9e-8（OMI 日資料）。quota 是整個隊伍共用的，≥ 0.95 之後整個月都不能再抓。所以全球平均與世界區域的平均改由全球格點在本機計算（見「全球格點月資料」），階段 a、c、d 與 b 的區域部分目前沒有資料。`--kind area`／`both` 仍保留（同時掛 `--harmony-jobs` 個 job、所有階段排成一個佇列），只適合台灣大小的 bbox（每個約 4e-7），送之前先確認 quota 與使用者的決定。
+- **可續跑**：同一天已成功的序列不重抓（紀錄在 `data/extended/state.point.json`、`state.area.json`）；Harmony 的 job id 記在 `data/raw/harmony/jobs.extended.json`，中斷後同一天重跑會接著等原本的 job。失敗的序列下次會重試。單一序列失敗不中斷，結束時依原因分組列出失敗數。
+- **看進度**：`uv run python -m trend_detective.extended --status`（不連網）列出各階段已有、失敗、尚未抓的數量，並依磁碟上的序列檔重寫 `data/extended/catalog.json`。抓取進行中每 5 分鐘也會重寫一次目錄檔，先完成的先能用。每次執行的平行度、耗時、quota 記在 `data/extended/runs.jsonl`。
+- 世界區域是經緯度方框，含海面（GLDAS、FLDAS 這類陸面模式只有陸地格點有值）；之後算區域平均時要自己決定面積加權與陸地遮罩。
+- 海面上或該產品沒有資料的點位會整條缺值，記為失敗、不內移（世界城市沒有設 `inland_direction`）。
+- 原始回應照舊存在 `data/raw/giovanni/`、`data/raw/harmony/`，檔名是 `<變數 id>__<地點 id>.csv`。
+
 ## 全球格點月資料（試做，#47）
 每個網格一條月序列，給之後的全球地圖用；和 `data/snapshot/` 的序列分開，快照指令不會動它。
 
@@ -88,7 +102,7 @@ Skills 來源：上游 `mattpocock/skills` 的 plugin（安裝方式見 `docs/ag
 同一批資料的另一種形式，給隊員與評審用 SQL 查；公開 demo 不讀它。
 
 - 重建：`uv run python -m trend_detective.sqlite_export`，約 2 秒，產生 `data/sqlite/trend_detective.sqlite`（約 30 MB，不進 git）。每次都從頭重建，冪等。
-- 輸入是 `data/snapshot/`（統一表與對照表）加 `data/raw/`（各來源表）。只有快照、沒有 `data/raw/` 的機器也能建，來源表會是空的。
+- 輸入是 `data/snapshot/`（統一表與對照表）加 `data/raw/`（各來源表），以及 `data/extended/`（擴充資料，有目錄檔才匯入；`--extended-dir` 可改位置）。`observations`、`series`、`variables`、`locations` 都有 `tier` 欄（`core`／`extended`），只看核心就加 `WHERE tier = 'core'`。只有快照、沒有 `data/raw/` 的機器也能建，來源表會是空的。
 - 表：`observations`（統一表）、`series`、`variables`、`locations`、`src_giovanni`、`src_harmony`、`src_nasa_power`、`src_noaa_ghcnh`、`src_appeears`、`src_planetary_computer`。用途見 `src/trend_detective/sqlite_export.py` 開頭與 README。
 - 新增資料來源時：在 `SOURCE_TABLES` 加一筆、在 `SCHEMA` 加來源表、寫一個 `_insert_<來源>`，並補測試。
 - `src_noaa_ghcnh` 只放當地日的日平均與觀測筆數，不放逐時原始值。
