@@ -41,6 +41,13 @@ Skills 來源：上游 `mattpocock/skills` 的 plugin（安裝方式見 `docs/ag
 - 測試（全部）：`uv run pytest`
 - 測試（單檔）：`uv run pytest path/to/test_x.py`
 
+### 前端
+- 安裝：`npm ci --prefix web`
+- 格式：`npm run format:check --prefix web`
+- 靜態檢查：`npm run lint --prefix web && npm run typecheck --prefix web`
+- 測試（全部）：`npm test --prefix web`
+- 測試（單檔）：`npm test --prefix web -- src/path/to/file.test.ts`
+
 ## 如何重新產生資料
 靜態快照在 `data/snapshot/`（`catalog.json` 加 `series/*.json`，統一格式見 #4），會進 git；公開 demo 只讀這些檔。
 
@@ -56,7 +63,7 @@ Skills 來源：上游 `mattpocock/skills` 的 plugin（安裝方式見 `docs/ag
 - 抓取前會先查 Giovanni `/quota`，用量達 0.95 就停。
 - 重跑時，資料沒變的序列檔不動（`retrieved_at` 是「這條序列內容上次變動的時間」）；目錄檔的 `snapshot.generated_at`（快照日）在「全部來源都跑、沒有略過」時每次都更新，所以資料沒變時整份重跑，`git diff` 只有 `generated_at` 一行不同；加 `--source` 只重抓部分來源、或缺 token 被略過時，快照日不動。
 - 序列檔的 `request.end_policy = "run_date"` 表示查詢結束日是執行當天；實際涵蓋範圍看 `points` 的起訖月。`grid` 是資料實際所在的網格中心，可能與請求座標不同。
-- 本機看最小驗證頁：`python3 -m http.server 8791` 後開 `http://localhost:8791/web/`。
+- 本機看最小驗證頁：`python3 -m http.server 8791` 後開 `http://localhost:8791/web/tracer/`。地球畫面是 `web/` 的 Vite app，不取代這個驗證頁的資料路徑。
 - 新增變數或地點：改 `data/seed/variables.json`、`data/seed/locations.json`（清單是資料，不寫在程式裡）。目錄檔的 `unit`、`valid_from`、`valid_to` 由抓到的資料算出，不寫在 seed。
 - 單一序列失敗不會中斷整批；結束時印出成功、內移、失敗清單，有失敗時 exit code 為 1。失敗的序列若先前已有檔案，舊檔保留。
 - 靠海格點被遮罩時 Giovanni 不報錯，而是整條回傳缺值；地點有 `inland_direction` 時會往內陸移一格重試，實際座標記在序列檔的 `request.location`，原本的座標記在 `request.requested_location`。
