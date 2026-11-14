@@ -66,7 +66,9 @@ export function App() {
         <a href="https://visibleearth.nasa.gov/images/57730/blue-marble-land-surface-ocean-color-sea-ice-and-clouds">
           NASA Visible Earth
         </a>
-        . NASA insignia is not used.
+        . Closer Taiwan view: Blue Marble shaded relief,{" "}
+        <a href="https://gibs.earthdata.nasa.gov/">NASA GIBS</a>. NASA insignia
+        is not used.
       </p>
     </div>
   );

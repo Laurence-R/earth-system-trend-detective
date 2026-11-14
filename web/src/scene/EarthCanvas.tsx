@@ -6,6 +6,7 @@ import { layerRegistry, type LayerDefinition } from "../layers/registry";
 import { mockNormalized } from "../mock/snapshot";
 import { createSceneRenderer } from "./createSceneRenderer";
 import { Earth } from "./Earth";
+import { TaiwanDetail } from "./TaiwanDetail";
 import { FlyCamera } from "./FlyCamera";
 import { Markers } from "./Markers";
 import { type RendererKind } from "./rendererLabel";
@@ -48,6 +49,7 @@ function Scene({
       <directionalLight position={[4, 2, 3]} intensity={1.1} />
       <Suspense fallback={null}>
         <Earth />
+        <TaiwanDetail />
       </Suspense>
       <Markers selectedId={locationId} onSelect={onSelectLocation} />
       {layerRegistry.map((layer) => (
@@ -65,7 +67,13 @@ function Scene({
           onFlyDone();
         }}
       />
-      <OrbitControls key={controlEpoch} enablePan={false} enabled={!flying} />
+      <OrbitControls
+        key={controlEpoch}
+        enablePan={false}
+        enabled={!flying}
+        minDistance={1.18}
+        maxDistance={6}
+      />
     </>
   );
 }
