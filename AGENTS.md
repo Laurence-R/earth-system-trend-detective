@@ -41,6 +41,13 @@ Skills 來源：上游 `mattpocock/skills` 的 plugin（安裝方式見 `docs/ag
 - 測試（全部）：`uv run pytest`
 - 測試（單檔）：`uv run pytest path/to/test_x.py`
 
+### 前端
+- 安裝：`npm ci --prefix web`
+- 格式：`npm run format:check --prefix web`
+- 靜態檢查：`npm run lint --prefix web && npm run typecheck --prefix web`
+- 測試（全部）：`npm test --prefix web`
+- 測試（單檔）：`npm test --prefix web -- src/path/to/file.test.ts`
+
 ## Agent skills
 
 `setup-matt-pocock-skills` 的設定已預先完成，不需要重跑；重跑會在 `CLAUDE.md` 產生重複的區塊。
