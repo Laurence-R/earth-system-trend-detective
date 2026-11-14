@@ -108,10 +108,21 @@ body,
   gap: 4px;
 }
 
-.layers label {
+.layers label,
+.month {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.month {
+  margin: 0 0 8px;
+}
+
+.reading {
+  margin-left: auto;
+  color: #d5e4f5;
+  text-align: right;
 }
 
 .layers input[type="range"] {

@@ -3,7 +3,7 @@ import { Canvas } from "@react-three/fiber";
 import { Suspense, useState } from "react";
 import { GlassParticleLayer } from "../layers/GlassParticleLayer";
 import { layerRegistry, type LayerDefinition } from "../layers/registry";
-import { mockNormalized } from "../mock/snapshot";
+import { mockLocations, type MockLocation } from "../mock/snapshot";
 import { createSceneRenderer } from "./createSceneRenderer";
 import { Earth } from "./Earth";
 import { TaiwanDetail } from "./TaiwanDetail";
@@ -21,6 +21,8 @@ type EarthCanvasProps = {
   forceWebGL: boolean;
   flying: boolean;
   layers: SceneLayer[];
+  intensities: Record<string, number>;
+  places: MockLocation[];
   locationId: string;
   onKind: (kind: RendererKind) => void;
   onFlyDone: () => void;
@@ -30,12 +32,16 @@ type EarthCanvasProps = {
 function Scene({
   flying,
   layers,
+  intensities,
+  places,
   locationId,
   onFlyDone,
   onSelectLocation,
 }: {
   flying: boolean;
   layers: SceneLayer[];
+  intensities: Record<string, number>;
+  places: MockLocation[];
   locationId: string;
   onFlyDone: () => void;
   onSelectLocation: (id: string) => void;
@@ -51,13 +57,17 @@ function Scene({
         <Earth />
         <TaiwanDetail />
       </Suspense>
-      <Markers selectedId={locationId} onSelect={onSelectLocation} />
+      <Markers
+        locations={places.length > 0 ? places : mockLocations}
+        selectedId={locationId}
+        onSelect={onSelectLocation}
+      />
       {layerRegistry.map((layer) => (
         <LayerView
           key={layer.id}
           layer={layer}
           control={layers.find((item) => item.id === layer.id)}
-          locationId={locationId}
+          intensity={intensities[layer.id] ?? 0}
         />
       ))}
       <FlyCamera
@@ -81,11 +91,11 @@ function Scene({
 function LayerView({
   layer,
   control,
-  locationId,
+  intensity,
 }: {
   layer: LayerDefinition;
   control: SceneLayer | undefined;
-  locationId: string;
+  intensity: number;
 }) {
   if (!control) return null;
   return (
@@ -93,7 +103,7 @@ function LayerView({
       layer={layer}
       visible={control.visible}
       opacity={control.opacity}
-      intensity={mockNormalized(layer.id, locationId)}
+      intensity={intensity}
     />
   );
 }
@@ -102,6 +112,8 @@ export function EarthCanvas({
   forceWebGL,
   flying,
   layers,
+  intensities,
+  places,
   locationId,
   onKind,
   onFlyDone,
@@ -117,6 +129,8 @@ export function EarthCanvas({
       <Scene
         flying={flying}
         layers={layers}
+        intensities={intensities}
+        places={places}
         locationId={locationId}
         onFlyDone={onFlyDone}
         onSelectLocation={onSelectLocation}

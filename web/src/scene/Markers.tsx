@@ -1,15 +1,16 @@
 import { latLonToVector3 } from "../geo/latLon";
-import { mockLocations } from "../mock/snapshot";
+import type { MockLocation } from "../mock/snapshot";
 
 type MarkersProps = {
+  locations: MockLocation[];
   selectedId: string;
   onSelect: (id: string) => void;
 };
 
-export function Markers({ selectedId, onSelect }: MarkersProps) {
+export function Markers({ locations, selectedId, onSelect }: MarkersProps) {
   return (
     <>
-      {mockLocations.map((location) => {
+      {locations.map((location) => {
         const position = latLonToVector3(location.lat, location.lon, 1.008);
         const selected = location.id === selectedId;
         return (
