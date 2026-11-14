@@ -1,30 +1,47 @@
 import { OrbitControls } from "@react-three/drei";
 import { Canvas, type CanvasProps } from "@react-three/fiber";
+import { Suspense, useState } from "react";
 import { WebGPURenderer } from "three/webgpu";
+import { Earth } from "./Earth";
+import { FlyCamera } from "./FlyCamera";
+import { Markers } from "./Markers";
 import { rendererKindFromBackend, type RendererKind } from "./rendererLabel";
 
 type CreateGl = NonNullable<CanvasProps["gl"]>;
 
 type EarthCanvasProps = {
   forceWebGL: boolean;
+  flying: boolean;
   onKind: (kind: RendererKind) => void;
+  onFlyDone: () => void;
 };
 
-function Scene() {
+function Scene({
+  flying,
+  onFlyDone,
+}: {
+  flying: boolean;
+  onFlyDone: () => void;
+}) {
+  const [controlEpoch, setControlEpoch] = useState(0);
+
   return (
     <>
       <color attach="background" args={["#0b1220"]} />
-      <ambientLight intensity={0.55} />
-      <directionalLight position={[4, 2, 3]} intensity={1.3} />
-      <mesh>
-        <sphereGeometry args={[1, 64, 64]} />
-        <meshStandardMaterial
-          color="#7aa2c4"
-          roughness={0.65}
-          metalness={0.05}
-        />
-      </mesh>
-      <OrbitControls enablePan={false} />
+      <ambientLight intensity={0.85} />
+      <directionalLight position={[4, 2, 3]} intensity={1.1} />
+      <Suspense fallback={null}>
+        <Earth />
+      </Suspense>
+      <Markers />
+      <FlyCamera
+        flying={flying}
+        onDone={() => {
+          setControlEpoch((epoch) => epoch + 1);
+          onFlyDone();
+        }}
+      />
+      <OrbitControls key={controlEpoch} enablePan={false} enabled={!flying} />
     </>
   );
 }
@@ -49,7 +66,12 @@ function createGl(
   };
 }
 
-export function EarthCanvas({ forceWebGL, onKind }: EarthCanvasProps) {
+export function EarthCanvas({
+  forceWebGL,
+  flying,
+  onKind,
+  onFlyDone,
+}: EarthCanvasProps) {
   return (
     <Canvas
       key={forceWebGL ? "webgl" : "auto"}
@@ -57,7 +79,7 @@ export function EarthCanvas({ forceWebGL, onKind }: EarthCanvasProps) {
       dpr={[1, 2]}
       gl={createGl(forceWebGL, onKind)}
     >
-      <Scene />
+      <Scene flying={flying} onFlyDone={onFlyDone} />
     </Canvas>
   );
 }

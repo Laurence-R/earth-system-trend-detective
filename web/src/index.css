@@ -41,3 +41,25 @@ body,
 .hud button {
   cursor: pointer;
 }
+
+.hud button:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.credit {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  max-width: min(420px, calc(100% - 24px));
+  margin: 0;
+  color: #d7e2f0;
+  font:
+    12px/1.4 system-ui,
+    sans-serif;
+}
+
+.credit a {
+  color: inherit;
+}
