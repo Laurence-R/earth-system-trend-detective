@@ -3,11 +3,12 @@
 import json
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from trend_detective.giovanni import GiovanniClient
-from trend_detective.snapshot import build_snapshot, load_seed
+from trend_detective.snapshot import SnapshotResult, build_snapshot, load_seed
 
 FIXTURE = Path(__file__).parent / "fixtures" / "giovanni_imerg_taichung_2020.csv"
 SEED_DIR = Path(__file__).parents[1] / "data" / "seed"
@@ -238,7 +239,11 @@ def test_seed_lists_ten_giovanni_variables_and_five_points_with_student_facing_t
         assert (
             variable["name_zh"] and variable["definition_zh"] and variable["category"]
         )
-    assert [loc["id"] for loc in locations if "ghcnh_id" not in loc] == [
+    assert [
+        loc["id"]
+        for loc in locations
+        if loc["kind"] == "point" and "ghcnh_id" not in loc
+    ] == [
         "taichung",
         "taipei",
         "kaohsiung",
@@ -534,3 +539,326 @@ def test_power_series_ends_at_the_last_month_that_has_a_value(tmp_path: Path):
     assert series["points"][-1]["month"] == "2026-09-01"
     assert series["request"]["api_version"] == "v2.10.0"
     assert series["request"]["sources"] == ["MERRA2"]
+
+
+from trend_detective.harmony import HarmonyClient
+from trend_detective.regions import DEFAULT_REGIONS
+
+AREA_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "harmony_gldas_tair_taiwan_sample.csv"
+)
+TAIR = {
+    **PRECIP,
+    "id": "gldas_tair",
+    "source_variable_id": "GLDAS_NOAH025_M_2_1_Tair_f_inst",
+    "harmony_collection": "C1-GES_DISC",
+}
+TAIWAN = {"id": "taiwan", "kind": "region", "bbox": [120.0, 21.8, 122.1, 25.4]}
+TAIWAN_POINT = {"id": "taiwan", "kind": "point", "lat": 23.7, "lon": 121.0}
+
+
+def _harmony(calls: list[str], final_status: str = "successful") -> HarmonyClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append(path)
+        if path == "/quota":
+            return httpx.Response(200, json={"quota": 0.0})
+        if path.endswith("/rangeset"):
+            return httpx.Response(
+                200, json={"jobID": f"job-{len(calls)}", "status": "running"}
+            )
+        if path.startswith("/jobs/"):
+            links = [{"rel": "data", "href": "https://harmony.test/results/out.csv"}]
+            return httpx.Response(200, json={"status": final_status, "links": links})
+        return httpx.Response(200, text=AREA_FIXTURE.read_text(encoding="utf-8"))
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://harmony.test/"
+    )
+    return HarmonyClient(token=SECRET, http=http)
+
+
+def _point_then_area(tmp_path: Path, calls: list[str], **extra) -> SnapshotResult:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_csv("2020-01-01 00:00,290.5"))
+
+    return build_snapshot(
+        _client(respond),
+        tmp_path,
+        [TAIR],
+        [TAIWAN_POINT, TAIWAN],
+        harmony_client=_harmony(calls, **extra),
+        sleep=lambda seconds: None,
+        **RUN,
+    )
+
+
+def test_area_mean_series_is_written_next_to_the_point_series_of_the_same_place(
+    tmp_path: Path,
+):
+    result = _point_then_area(tmp_path, [])
+
+    assert result.succeeded == [("gldas_tair", "taiwan"), ("gldas_tair", "taiwan")]
+    point = json.loads(
+        (tmp_path / "series" / "gldas_tair__taiwan__point.json").read_text()
+    )
+    area = json.loads(
+        (tmp_path / "series" / "gldas_tair__taiwan__area_mean.json").read_text()
+    )
+    assert len(point["points"]) == 1
+    assert area["aggregation"] == "area_mean"
+    assert area["source_api"] == "harmony"
+    assert area["unit"] == "K"  # 與同變數的點位序列相同
+    assert area["request"]["bbox"] == [120.0, 21.8, 122.1, 25.4]
+    assert len(area["points"]) == 27
+    assert area["points"][0] == {
+        "month": "2001-01-01",
+        "value": 288.3125,
+        "n_samples": 1,
+        "coverage": 1,
+    }
+    catalog = json.loads((tmp_path / "catalog.json").read_text())
+    assert [s["aggregation"] for s in catalog["series"]] == ["area_mean", "point"]
+
+
+def test_a_failed_harmony_job_is_reported_and_writes_no_area_series(tmp_path: Path):
+    result = _point_then_area(tmp_path, [], final_status="failed")
+
+    assert "failed" in result.failures[("gldas_tair", "taiwan")]
+    assert not (tmp_path / "series" / "gldas_tair__taiwan__area_mean.json").exists()
+
+
+def test_same_day_rerun_reuses_the_finished_job_result_instead_of_submitting_again(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw"
+    args = (None, tmp_path / "snap", [TAIR], [TAIWAN])
+    point = tmp_path / "snap" / "series" / "gldas_tair__taichung__point.json"
+    build_snapshot(
+        _client(
+            lambda request: httpx.Response(200, text=_csv("2020-01-01 00:00,290.5"))
+        ),
+        tmp_path / "snap",
+        [TAIR],
+        [TAICHUNG],
+        **RUN,
+    )
+    assert point.exists()
+    build_snapshot(
+        *args, harmony_client=_harmony([]), raw_dir=raw, sleep=lambda s: None, **RUN
+    )
+
+    calls: list[str] = []
+    result = build_snapshot(
+        *args, harmony_client=_harmony(calls), raw_dir=raw, sleep=lambda s: None, **RUN
+    )
+
+    assert not any(path.endswith("/rangeset") for path in calls)
+    assert result.succeeded == [("gldas_tair", "taiwan")]
+
+
+def test_seed_regions_match_the_default_regions_and_carry_bbox_and_geojson():
+    _, locations = load_seed(SEED_DIR)
+
+    regions = [loc for loc in locations if loc["kind"] == "region"]
+    assert [(r["id"], tuple(r["bbox"])) for r in regions] == [
+        (r.id, r.bbox) for r in DEFAULT_REGIONS
+    ]
+    assert all(r["geojson"]["geometry"]["type"] == "Polygon" for r in regions)
+
+
+def test_area_job_starts_at_the_first_month_the_product_has_data(tmp_path: Path):
+    # AIRS、OMI 的第一筆晚於 2001-01；Harmony 會拒絕更早的起始日
+    submitted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/quota":
+            return httpx.Response(200, json={"quota": 0.0})
+        if path.endswith("/rangeset"):
+            submitted.extend(
+                v for k, v in request.url.params.multi_items() if "time" in v
+            )
+            return httpx.Response(200, json={"jobID": "job-1"})
+        if path.startswith("/jobs/"):
+            links = [{"rel": "data", "href": "https://harmony.test/results/out.csv"}]
+            return httpx.Response(200, json={"status": "successful", "links": links})
+        return httpx.Response(200, text=AREA_FIXTURE.read_text(encoding="utf-8"))
+
+    harmony = HarmonyClient(
+        token=SECRET,
+        http=httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="https://harmony.test/"
+        ),
+    )
+    build_snapshot(
+        _client(
+            lambda request: httpx.Response(
+                200, text=_csv("2004-09-01 00:00,-9999", "2004-10-01 00:00,290.5")
+            )
+        ),
+        tmp_path,
+        [TAIR],
+        [TAIWAN_POINT, TAIWAN],
+        harmony_client=harmony,
+        sleep=lambda seconds: None,
+        **RUN,
+    )
+
+    assert submitted == ['time("2004-10-01T00:00:00Z":"2026-11-14T23:59:59Z")']
+    area = json.loads(
+        (tmp_path / "series" / "gldas_tair__taiwan__area_mean.json").read_text()
+    )
+    assert area["request"]["start"] == "2004-10-01"
+
+
+def _scripted_harmony(
+    script: dict[str, list[tuple[int, Any]]], submitted: list[str]
+) -> HarmonyClient:
+    """每個 job id 依序回 script 裡的回應，最後一個回應會一直重複。"""
+    polls: dict[str, int] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/quota":
+            return httpx.Response(200, json={"quota": 0.0})
+        if path.endswith("/rangeset"):
+            job_id = f"job-{len(submitted) + 1}"
+            submitted.append(job_id)
+            return httpx.Response(200, json={"jobID": job_id})
+        if path.startswith("/jobs/"):
+            job_id = path.rsplit("/", 1)[-1]
+            answers = script.get(job_id, script["*"])
+            index = min(polls.get(job_id, 0), len(answers) - 1)
+            polls[job_id] = polls.get(job_id, 0) + 1
+            kind, body = answers[index]
+            return (
+                httpx.Response(kind, json=body)
+                if isinstance(body, dict)
+                else httpx.Response(kind, text=body)
+            )
+        return httpx.Response(200, text=AREA_FIXTURE.read_text(encoding="utf-8"))
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://harmony.test/"
+    )
+    return HarmonyClient(token=SECRET, http=http)
+
+
+RUNNING = (200, {"status": "running", "links": []})
+BLIP = (502, "bad gateway")
+DONE = (
+    200,
+    {
+        "status": "successful",
+        "links": [{"rel": "data", "href": "https://harmony.test/results/out.csv"}],
+    },
+)
+
+
+def _write_point_series(snapshot_dir: Path) -> None:
+    build_snapshot(
+        _client(
+            lambda request: httpx.Response(200, text=_csv("2020-01-01 00:00,290.5"))
+        ),
+        snapshot_dir,
+        [TAIR],
+        [TAICHUNG],
+        **RUN,
+    )
+
+
+def test_job_that_is_still_running_is_polled_until_it_finishes_despite_a_blip(
+    tmp_path: Path,
+):
+    _write_point_series(tmp_path)
+    naps: list[float] = []
+
+    result = build_snapshot(
+        None,
+        tmp_path,
+        [TAIR],
+        [TAIWAN],
+        harmony_client=_scripted_harmony({"*": [RUNNING, BLIP, RUNNING, DONE]}, []),
+        sleep=naps.append,
+        **RUN,
+    )
+
+    assert result.failures == {}
+    assert result.succeeded == [("gldas_tair", "taiwan")]
+    assert len(naps) == 3
+
+
+def test_more_jobs_than_the_batch_size_are_all_submitted_and_finished(tmp_path: Path):
+    _write_point_series(tmp_path)
+    regions = [{**TAIWAN, "id": f"r{i}"} for i in range(8)]
+    submitted: list[str] = []
+
+    result = build_snapshot(
+        None,
+        tmp_path,
+        [TAIR],
+        regions,
+        harmony_client=_scripted_harmony({"*": [RUNNING, DONE]}, submitted),
+        sleep=lambda seconds: None,
+        **RUN,
+    )
+
+    assert len(submitted) == 8
+    assert sorted(result.succeeded) == [("gldas_tair", f"r{i}") for i in range(8)]
+
+
+def test_interrupted_run_picks_up_the_running_job_instead_of_submitting_again(
+    tmp_path: Path,
+):
+    snap, raw = tmp_path / "snap", tmp_path / "raw"
+    _write_point_series(snap)
+    (raw / "harmony").mkdir(parents=True)
+    (raw / "harmony" / "jobs.json").write_text(
+        json.dumps(
+            {
+                "gldas_tair__taiwan": {
+                    "job_id": "old-job",
+                    "end": "2026-11-14",
+                    "status": "running",
+                }
+            }
+        )
+    )
+    submitted: list[str] = []
+
+    result = build_snapshot(
+        None,
+        snap,
+        [TAIR],
+        [TAIWAN],
+        harmony_client=_scripted_harmony({"*": [DONE]}, submitted),
+        raw_dir=raw,
+        sleep=lambda seconds: None,
+        **RUN,
+    )
+
+    assert submitted == []
+    assert result.succeeded == [("gldas_tair", "taiwan")]
+    assert (raw / "harmony" / "gldas_tair__taiwan.csv").exists()
+
+
+def test_region_without_any_grid_cell_of_the_product_is_skipped_not_failed(
+    tmp_path: Path,
+):
+    _write_point_series(tmp_path)
+    submitted: list[str] = []
+    coarse = {**TAIR, "harmony_skip_regions": ["taiwan"]}
+
+    result = build_snapshot(
+        None,
+        tmp_path,
+        [coarse],
+        [TAIWAN],
+        harmony_client=_scripted_harmony({"*": [DONE]}, submitted),
+        sleep=lambda seconds: None,
+        **RUN,
+    )
+
+    assert submitted == []
+    assert result.failures == {}
