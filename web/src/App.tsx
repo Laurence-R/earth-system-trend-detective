@@ -40,6 +40,7 @@ export function App() {
         <button type="button" onClick={() => setFlying(true)} disabled={flying}>
           Fly to Taiwan
         </button>
+        <a href={`${import.meta.env.BASE_URL}lab/`}>Form lab</a>
       </div>
       <LayerPanel
         layers={layerRegistry}

@@ -1,16 +1,14 @@
 import { OrbitControls } from "@react-three/drei";
-import { Canvas, type CanvasProps } from "@react-three/fiber";
+import { Canvas } from "@react-three/fiber";
 import { Suspense, useState } from "react";
-import { WebGPURenderer } from "three/webgpu";
 import { GlassParticleLayer } from "../layers/GlassParticleLayer";
 import { layerRegistry, type LayerDefinition } from "../layers/registry";
 import { mockNormalized } from "../mock/snapshot";
+import { createSceneRenderer } from "./createSceneRenderer";
 import { Earth } from "./Earth";
 import { FlyCamera } from "./FlyCamera";
 import { Markers } from "./Markers";
-import { rendererKindFromBackend, type RendererKind } from "./rendererLabel";
-
-type CreateGl = NonNullable<CanvasProps["gl"]>;
+import { type RendererKind } from "./rendererLabel";
 
 export type SceneLayer = {
   id: string;
@@ -92,26 +90,6 @@ function LayerView({
   );
 }
 
-function createGl(
-  forceWebGL: boolean,
-  onKind: (kind: RendererKind) => void,
-): CreateGl {
-  return async (props) => {
-    const renderer = new WebGPURenderer({
-      canvas: props.canvas as HTMLCanvasElement,
-      antialias: true,
-      forceWebGL,
-    });
-    await renderer.init();
-    onKind(
-      rendererKindFromBackend(
-        renderer.backend as { isWebGPUBackend?: boolean },
-      ),
-    );
-    return renderer;
-  };
-}
-
 export function EarthCanvas({
   forceWebGL,
   flying,
@@ -126,7 +104,7 @@ export function EarthCanvas({
       key={forceWebGL ? "webgl" : "auto"}
       camera={{ position: [0, 0, 3.2], fov: 45 }}
       dpr={[1, 2]}
-      gl={createGl(forceWebGL, onKind)}
+      gl={createSceneRenderer(forceWebGL, onKind)}
     >
       <Scene
         flying={flying}

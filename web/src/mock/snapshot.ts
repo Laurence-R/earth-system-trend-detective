@@ -17,12 +17,18 @@ export const taiwanOverview = { lat: 23.7, lon: 121.0 };
 
 export type ParticleMotion = "fall" | "drift";
 
+export type ColorFamily = "water" | "warm" | "gas" | "aerosol" | "vegetation";
+
+export type FormId = "water-droplet" | "round-air";
+
 export type MockVariable = {
   id: string;
   nameEn: string;
   glassColor: string;
   particleColor: string;
   motion: ParticleMotion;
+  colorFamily: ColorFamily;
+  formId: FormId | null;
 };
 
 export const mockVariables: MockVariable[] = [
@@ -30,85 +36,109 @@ export const mockVariables: MockVariable[] = [
     id: "imerg_precip",
     nameEn: "Precipitation",
     glassColor: "#8ec8ff",
-    particleColor: "#e7f6ff",
+    particleColor: "#8ec8ff",
     motion: "fall",
+    colorFamily: "water",
+    formId: "water-droplet",
   },
   {
     id: "gldas_tair",
     nameEn: "Near-surface air temperature",
-    glassColor: "#ffb086",
-    particleColor: "#ffe0cc",
+    glassColor: "#ff8a3d",
+    particleColor: "#ffd8bf",
     motion: "drift",
+    colorFamily: "warm",
+    formId: null,
   },
   {
     id: "gldas_soilmoist",
     nameEn: "Surface soil moisture",
-    glassColor: "#6f8f5a",
-    particleColor: "#d5e2b8",
+    glassColor: "#2f6fad",
+    particleColor: "#d5e6f7",
     motion: "drift",
+    colorFamily: "water",
+    formId: null,
   },
   {
     id: "gldas_evap",
     nameEn: "Evapotranspiration",
-    glassColor: "#7fd0c8",
-    particleColor: "#d7fffb",
+    glassColor: "#5aa3c4",
+    particleColor: "#e5f6fb",
     motion: "drift",
+    colorFamily: "water",
+    formId: null,
   },
   {
     id: "airs_tsurf",
     nameEn: "Surface air temperature",
-    glassColor: "#ff8a6a",
-    particleColor: "#ffd0c2",
+    glassColor: "#ff6a3d",
+    particleColor: "#ffd0c4",
     motion: "drift",
+    colorFamily: "warm",
+    formId: null,
   },
   {
     id: "airs_h2ovap",
     nameEn: "Total water vapor",
-    glassColor: "#b7d4ff",
-    particleColor: "#eef5ff",
+    glassColor: "#b9d7f5",
+    particleColor: "#f3f8ff",
     motion: "drift",
+    colorFamily: "water",
+    formId: null,
   },
   {
     id: "merra2_t2m",
     nameEn: "2 m air temperature",
-    glassColor: "#ffd27a",
-    particleColor: "#fff1cc",
+    glassColor: "#ffb020",
+    particleColor: "#ffe8bf",
     motion: "drift",
+    colorFamily: "warm",
+    formId: null,
   },
   {
     id: "omi_no2",
     nameEn: "Tropospheric NO2",
-    glassColor: "#c084fc",
-    particleColor: "#f3e8ff",
+    glassColor: "#a86832",
+    particleColor: "#e0b080",
     motion: "drift",
+    colorFamily: "gas",
+    formId: "round-air",
   },
   {
     id: "omi_o3",
     nameEn: "Total ozone",
-    glassColor: "#67e8f9",
-    particleColor: "#e0fbff",
+    glassColor: "#c4a574",
+    particleColor: "#f0e0cc",
     motion: "drift",
+    colorFamily: "gas",
+    formId: null,
   },
   {
     id: "omi_aerosol",
     nameEn: "UV aerosol index",
-    glassColor: "#d6d3d1",
-    particleColor: "#f5f5f4",
+    glassColor: "#9a948c",
+    particleColor: "#ece8e3",
     motion: "drift",
+    colorFamily: "aerosol",
+    formId: null,
   },
   {
     id: "modis_ndvi",
     nameEn: "Vegetation greenness",
-    glassColor: "#4ade80",
-    particleColor: "#dcfce7",
+    glassColor: "#2f9e57",
+    particleColor: "#d9f5e4",
     motion: "drift",
+    colorFamily: "vegetation",
+    formId: null,
   },
   {
     id: "modis_lst",
     nameEn: "Land surface temperature",
-    glassColor: "#fb7185",
-    particleColor: "#ffe4e6",
+    glassColor: "#e85d4c",
+    particleColor: "#ffd2cb",
     motion: "drift",
+    colorFamily: "warm",
+    formId: null,
   },
 ];
 

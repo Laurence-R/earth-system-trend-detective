@@ -29,7 +29,9 @@ body,
 }
 
 .badge,
-.hud button {
+.hud a,
+.hud button,
+.hud select {
   margin: 0;
   padding: 8px 12px;
   color: inherit;
@@ -38,7 +40,23 @@ body,
   border-radius: 6px;
 }
 
-.hud button {
+.hud a {
+  text-decoration: none;
+}
+
+.hud label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.hud input[type="range"] {
+  width: 140px;
+}
+
+.hud a,
+.hud button,
+.hud select {
   cursor: pointer;
 }
 

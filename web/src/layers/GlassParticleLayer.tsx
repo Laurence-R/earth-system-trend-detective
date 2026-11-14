@@ -8,6 +8,7 @@ import {
   type MeshStandardMaterial,
   type PointsMaterial,
 } from "three";
+import { formRegistry } from "../forms/registry";
 import type { LayerDefinition } from "./registry";
 
 const MAX_PARTICLES = 480;
@@ -76,6 +77,9 @@ export function GlassParticleLayer({
   const points = useRef<Points>(null);
   const pointMaterial = useRef<PointsMaterial>(null);
   const shown = useRef(visible ? opacity : 0);
+  const time = useRef(0);
+  const form = formRegistry.find((item) => item.id === layer.formId);
+  const FormParticles = form?.Component;
   const shell = useMemo(
     () => shellGeometry(layer.shellRadius, seedFromId(layer.id)),
     [layer.id, layer.shellRadius],
@@ -93,8 +97,10 @@ export function GlassParticleLayer({
   useFrame((_, delta) => {
     const target = visible ? opacity : 0;
     shown.current += (target - shown.current) * (1 - Math.exp(-5 * delta));
+    time.current += delta;
     const amount = shown.current;
     if (glass.current) glass.current.opacity = amount * 0.38;
+    if (form) return;
     if (pointMaterial.current) pointMaterial.current.opacity = amount;
     const position = geometry.getAttribute("position");
     if (!(position instanceof BufferAttribute)) return;
@@ -145,17 +151,26 @@ export function GlassParticleLayer({
           depthWrite={false}
         />
       </mesh>
-      <points ref={points} geometry={geometry}>
-        <pointsMaterial
-          ref={pointMaterial}
+      {FormParticles ? (
+        <FormParticles
+          value={intensity}
+          timeRef={time}
+          opacityRef={shown}
           color={layer.particleColor}
-          size={layer.motion === "fall" ? 0.018 : 0.014}
-          transparent
-          opacity={0}
-          depthWrite={false}
-          sizeAttenuation
         />
-      </points>
+      ) : (
+        <points ref={points} geometry={geometry}>
+          <pointsMaterial
+            ref={pointMaterial}
+            color={layer.particleColor}
+            size={layer.motion === "fall" ? 0.018 : 0.014}
+            transparent
+            opacity={0}
+            depthWrite={false}
+            sizeAttenuation
+          />
+        </points>
+      )}
     </group>
   );
 }
