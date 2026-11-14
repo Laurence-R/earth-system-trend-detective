@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from trend_detective.giovanni import GiovanniClient
 from trend_detective.snapshot import SnapshotResult, build_snapshot, load_seed
@@ -916,3 +917,470 @@ def test_a_full_regeneration_moves_only_the_snapshot_date_when_data_is_unchanged
     assert catalog_after["snapshot"]["generated_at"] == "2026-11-15T09:00:00Z"
     catalog_before["snapshot"]["generated_at"] = "2026-11-15T09:00:00Z"
     assert catalog_after == catalog_before
+
+
+APPEEARS_FIXTURE = Path(__file__).parent / "fixtures" / "appeears_ndvi"
+NDVI = {
+    "id": "modis_ndvi",
+    "source": "appeears",
+    "source_variable_id": "_1_km_monthly_NDVI",
+    "product": "MOD13A3.061",
+    "product_version": "061",
+    "native_temporal_res": "month",
+    "is_nasa": True,
+    "unit": "1",
+    "valid_range": [-1, 1],
+}
+EAST = {"id": "east", "kind": "region", "bbox": [121.0, 22.3, 121.8, 24.6]}
+
+
+def _appeears_task(
+    root: Path, task_id: str, task_name: str, *, downloaded: bool = True
+) -> None:
+    task_dir = root / "modis_ndvi" / task_id
+    task_dir.mkdir(parents=True)
+    (task_dir / "submission.json").write_text(
+        json.dumps({"task_id": task_id, "request": {"task_name": task_name}})
+    )
+    if downloaded:
+        for path in APPEEARS_FIXTURE.iterdir():
+            (task_dir / path.name).write_text(path.read_text(encoding="utf-8"))
+
+
+def test_downloaded_appeears_statistics_become_area_mean_series_per_region(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw" / "appeears"
+    _appeears_task(raw, "task-1", "trend-detective-modis_ndvi-20261114")
+
+    result = build_snapshot(
+        None, tmp_path / "snap", [NDVI], [TAIWAN, EAST], appeears_dir=raw, **RUN
+    )
+
+    assert result.failures == {}
+    assert result.succeeded == [("modis_ndvi", "taiwan"), ("modis_ndvi", "east")]
+    series = json.loads(
+        (tmp_path / "snap" / "series" / "modis_ndvi__east__area_mean.json").read_text()
+    )
+    assert series["source_api"] == "appeears"
+    assert series["unit"] == "1"
+    assert [p["month"] for p in series["points"]] == [
+        "2001-01-01",
+        "2001-02-01",
+        "2026-10-01",
+    ]
+    assert series["points"][0]["value"] == 0.7721598
+    assert all(-1 <= p["value"] <= 1 for p in series["points"])
+    # coverage = 有值像元數 ÷ 這個區域出現過的最大像元數（14850）
+    assert series["points"][0]["coverage"] == 14730 / 14850
+    assert series["request"]["tasks"] == [
+        {"task_name": "trend-detective-modis_ndvi-20261114", "task_id": "task-1"}
+    ]
+
+
+def test_a_variable_sent_in_parts_is_not_written_until_every_part_is_downloaded(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw" / "appeears"
+    _appeears_task(raw, "task-1", "trend-detective-modis_ndvi-20261114-p1of2")
+    _appeears_task(
+        raw, "task-2", "trend-detective-modis_ndvi-20261114-p2of2", downloaded=False
+    )
+
+    result = build_snapshot(
+        None, tmp_path / "snap", [NDVI], [TAIWAN], appeears_dir=raw, **RUN
+    )
+
+    assert "還沒下載" in result.failures[("modis_ndvi", "taiwan")]
+    assert not (tmp_path / "snap" / "series").exists()
+
+
+def test_a_value_outside_the_plausible_range_fails_the_variable(tmp_path: Path):
+    raw = tmp_path / "raw" / "appeears"
+    _appeears_task(raw, "task-1", "trend-detective-modis_ndvi-20261114")
+    kelvin_by_mistake = {**NDVI, "valid_range": [250, 340]}
+
+    result = build_snapshot(
+        None, tmp_path / "snap", [kelvin_by_mistake], [TAIWAN], appeears_dir=raw, **RUN
+    )
+
+    assert "合理範圍" in result.failures[("modis_ndvi", "taiwan")]
+
+
+def test_coverage_counts_only_pixels_that_pass_qa_when_the_variable_names_a_qa_file(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw" / "appeears"
+    _appeears_task(raw, "task-1", "trend-detective-modis_ndvi-20261114")
+    with_qa = {
+        **NDVI,
+        "appeears_qa": {
+            "file_suffix": "pixel-reliability-Statistics-QA.csv",
+            "good_values": ["0", "1"],
+        },
+    }
+
+    build_snapshot(
+        None, tmp_path / "snap", [with_qa], [TAIWAN], appeears_dir=raw, **RUN
+    )
+
+    series = json.loads(
+        (
+            tmp_path / "snap" / "series" / "modis_ndvi__taiwan__area_mean.json"
+        ).read_text()
+    )
+    # 2001-01 taiwan：好 35855 + 尚可 10389，分母是最大像元數 47037
+    assert series["points"][0]["coverage"] == (35855 + 10389) / 47037
+
+
+def test_no_region_is_written_when_a_later_region_fails_the_range_check(tmp_path: Path):
+    raw = tmp_path / "raw" / "appeears"
+    _appeears_task(raw, "task-1", "trend-detective-modis_ndvi-20261114")
+    # taiwan 的值都在 0.76 以下，east 有超過的
+    narrow = {**NDVI, "valid_range": [-1, 0.76]}
+
+    result = build_snapshot(
+        None, tmp_path / "snap", [narrow], [TAIWAN, EAST], appeears_dir=raw, **RUN
+    )
+
+    assert set(result.failures) == {("modis_ndvi", "taiwan"), ("modis_ndvi", "east")}
+    assert result.succeeded == []
+    assert not (tmp_path / "snap" / "series").exists()
+
+
+def _split_task(
+    root: Path, task_id: str, task_name: str, months: tuple[str, ...]
+) -> None:
+    _appeears_task(root, task_id, task_name)
+    stats = root / "modis_ndvi" / task_id / "MOD13A3-061-Statistics.csv"
+    lines = stats.read_text(encoding="utf-8").splitlines()
+    kept = [lines[0]] + [line for line in lines[1:] if line.split(",")[3][:7] in months]
+    stats.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+
+def test_parts_of_one_variable_are_joined_into_one_series_in_date_order(tmp_path: Path):
+    raw = tmp_path / "raw" / "appeears"
+    _split_task(
+        raw, "task-2", "trend-detective-modis_ndvi-20261114-p2of2", ("2026-10",)
+    )
+    _split_task(
+        raw,
+        "task-1",
+        "trend-detective-modis_ndvi-20261114-p1of2",
+        ("2001-01", "2001-02"),
+    )
+
+    result = build_snapshot(
+        None, tmp_path / "snap", [NDVI], [TAIWAN], appeears_dir=raw, **RUN
+    )
+
+    assert result.failures == {}
+    series = json.loads(
+        (
+            tmp_path / "snap" / "series" / "modis_ndvi__taiwan__area_mean.json"
+        ).read_text()
+    )
+    assert [p["month"] for p in series["points"]] == [
+        "2001-01-01",
+        "2001-02-01",
+        "2026-10-01",
+    ]
+    assert [t["task_name"][-5:] for t in series["request"]["tasks"]] == [
+        "p1of2",
+        "p2of2",
+    ]
+
+
+def test_parts_whose_date_ranges_overlap_are_rejected(tmp_path: Path):
+    raw = tmp_path / "raw" / "appeears"
+    _split_task(
+        raw,
+        "task-1",
+        "trend-detective-modis_ndvi-20261114-p1of2",
+        ("2001-01", "2001-02"),
+    )
+    _split_task(
+        raw,
+        "task-2",
+        "trend-detective-modis_ndvi-20261114-p2of2",
+        ("2001-02", "2026-10"),
+    )
+
+    result = build_snapshot(
+        None, tmp_path / "snap", [NDVI], [TAIWAN], appeears_dir=raw, **RUN
+    )
+
+    assert "重複的日期" in result.failures[("modis_ndvi", "taiwan")]
+
+
+LST_PC = {
+    "id": "modis_lst_pc",
+    "source": "planetary_computer",
+    "source_variable_id": "LST_Day_1km",
+    "pc_collection": "modis-11A2-061",
+    "pc_item_prefix": "MOD11A2.",
+    "product": "MOD11A2.061",
+    "product_version": "061",
+    "native_temporal_res": "8day",
+    "is_nasa": True,
+    "unit": "K",
+    "valid_range": [270, 330],
+}
+PC_STATS_HEADER = (
+    "date,location_id,asset,count,mean,standard_deviation,minimum,maximum,"
+    "pixels_in_bbox,tiles,item_ids"
+)
+
+
+def _pc_stats(raw: Path, *rows: str) -> None:
+    path = raw / "modis_lst_pc" / "stats.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text("\n".join([PC_STATS_HEADER, *rows]) + "\n", encoding="utf-8")
+
+
+def test_planetary_computer_statistics_become_monthly_area_mean_series(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw" / "planetary_computer"
+    _pc_stats(
+        raw,
+        "2020-01-01,taiwan,LST_Day_1km,100,290.0,1.0,280.0,300.0,400,h28v06;h29v06,A.h28;A.h29",
+        "2020-01-09,taiwan,LST_Day_1km,50,292.0,1.0,280.0,300.0,400,h28v06;h29v06,B.h28;B.h29",
+        # 整個合成期都被雲蓋住：沒有值
+        "2020-01-17,taiwan,LST_Day_1km,0,,,,,400,h28v06;h29v06,C.h28;C.h29",
+        "2020-02-02,taiwan,LST_Day_1km,80,295.0,1.0,280.0,300.0,400,h28v06;h29v06,D.h28;D.h29",
+        # 少了西邊 tile 的合成期：只涵蓋區域的一部分，不採用
+        "2020-02-10,taiwan,LST_Day_1km,60,299.0,1.0,280.0,300.0,300,h29v06,E.h29",
+    )
+
+    result = build_snapshot(
+        None,
+        tmp_path / "snap",
+        [LST_PC],
+        [TAIWAN],
+        planetary_computer_dir=raw,
+        **RUN,
+    )
+
+    assert result.failures == {}
+    series = json.loads(
+        (tmp_path / "snap/series/modis_lst_pc__taiwan__area_mean.json").read_text()
+    )
+    assert series["source_api"] == "planetary_computer"
+    assert series["unit"] == "K"
+    # 一月：兩個有值的合成期平均；coverage = (100/100 + 50/100 + 0) ÷ 3
+    # 二月：只採用完整的那一期；coverage = (80/100 + 0) ÷ 2
+    assert series["points"] == [
+        {"month": "2020-01-01", "value": 291.0, "n_samples": 2, "coverage": 0.5},
+        {"month": "2020-02-01", "value": 295.0, "n_samples": 1, "coverage": 0.4},
+    ]
+    assert series["request"] == {
+        "stac_api": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        "collection": "modis-11A2-061",
+        "item_id_prefix": "MOD11A2.",
+        "product": "MOD11A2.061",
+        "asset": "LST_Day_1km",
+        "bbox": TAIWAN["bbox"],
+        "tiles": ["h28v06", "h29v06"],
+        "n_items": 9,
+        "n_composites": 5,
+        "n_incomplete_composites": 1,
+    }
+    catalog = json.loads((tmp_path / "snap/catalog.json").read_text())
+    assert [s["variable_id"] for s in catalog["series"]] == ["modis_lst_pc"]
+
+
+def test_planetary_computer_value_outside_valid_range_fails_the_variable(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw" / "planetary_computer"
+    # 忘了乘 scale factor 的原始值
+    _pc_stats(raw, "2020-01-01,taiwan,LST_Day_1km,100,14500.0,1,1,1,400,h29v06,A")
+
+    result = build_snapshot(
+        None,
+        tmp_path / "snap",
+        [LST_PC],
+        [TAIWAN],
+        planetary_computer_dir=raw,
+        **RUN,
+    )
+
+    assert "超出合理範圍" in result.failures[("modis_lst_pc", "taiwan")]
+    assert not (tmp_path / "snap/series").exists()
+
+
+def test_planetary_computer_without_fetched_statistics_reports_what_to_run(
+    tmp_path: Path,
+):
+    result = build_snapshot(
+        None,
+        tmp_path / "snap",
+        [LST_PC],
+        [TAIWAN],
+        planetary_computer_dir=tmp_path / "raw" / "planetary_computer",
+        **RUN,
+    )
+
+    assert "planetary_computer fetch" in result.failures[("modis_lst_pc", "taiwan")]
+
+
+# 區域序列來自 AppEEARS、點位序列來自 Planetary Computer 的變數（#51）
+LST_WITH_POINTS = {
+    "id": "modis_lst",
+    "source": "appeears",
+    "source_variable_id": "LST_Day_1km",
+    "product": "MOD11A2.061",
+    "product_version": "061",
+    "native_temporal_res": "8day",
+    "is_nasa": True,
+    "unit": "K",
+    "valid_range": [270, 330],
+    "point_source": {
+        "source": "planetary_computer",
+        "source_variable_id": "LST_Day_1km",
+        "pc_collection": "modis-11A2-061",
+        "pc_item_prefix": "MOD11A2.",
+        "product": "MOD11A2.061",
+        "product_version": "061",
+        "window_pixels": 3,
+        "pixel_size_m": 926.6,
+    },
+}
+
+
+def _pc_point_stats(raw: Path, *rows: str) -> None:
+    path = raw / "modis_lst" / "stats.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text("\n".join([PC_STATS_HEADER, *rows]) + "\n", encoding="utf-8")
+
+
+def test_planetary_computer_point_statistics_become_monthly_point_series(
+    tmp_path: Path,
+):
+    raw = tmp_path / "raw" / "planetary_computer"
+    _pc_point_stats(
+        raw,
+        "2020-01-01,taichung,LST_Day_1km,9,300.0,1.0,298.0,302.0,9,h29v06,A.h29",
+        "2020-01-09,taichung,LST_Day_1km,3,304.0,1.0,303.0,305.0,9,h29v06,B.h29",
+        # 視窗整個被雲蓋住：沒有值
+        "2020-01-17,taichung,LST_Day_1km,0,,,,,9,h29v06,C.h29",
+        "2020-02-02,taichung,LST_Day_1km,6,306.0,1.0,305.0,307.0,9,h29v06,D.h29",
+        # 這個合成期沒有點位所在的 tile：不採用
+        "2020-02-10,taichung,LST_Day_1km,0,,,,,0,,",
+    )
+
+    result = build_snapshot(
+        None,
+        tmp_path / "snap",
+        [LST_WITH_POINTS],
+        [TAICHUNG, TAIWAN],
+        planetary_computer_dir=raw,
+        **RUN,
+    )
+
+    assert result.failures == {}
+    assert result.succeeded == [("modis_lst", "taichung")]
+    series = json.loads(
+        (tmp_path / "snap/series/modis_lst__taichung__point.json").read_text()
+    )
+    assert series["aggregation"] == "point"
+    assert series["source_api"] == "planetary_computer"
+    assert series["unit"] == "K"
+    # 一月：(300 + 304) ÷ 2；coverage = (9/9 + 3/9 + 0) ÷ 3
+    # 二月：只有一期有值；coverage = (6/9 + 0) ÷ 2
+    assert series["points"] == [
+        {
+            "month": "2020-01-01",
+            "value": 302.0,
+            "n_samples": 2,
+            "coverage": pytest.approx(4 / 9),
+        },
+        {
+            "month": "2020-02-01",
+            "value": 306.0,
+            "n_samples": 1,
+            "coverage": pytest.approx(1 / 3),
+        },
+    ]
+    assert series["request"] == {
+        "stac_api": "https://planetarycomputer.microsoft.com/api/stac/v1",
+        "collection": "modis-11A2-061",
+        "item_id_prefix": "MOD11A2.",
+        "product": "MOD11A2.061",
+        "asset": "LST_Day_1km",
+        "location": {"lat": 24.15, "lon": 120.68},
+        "sampling": "mean of valid pixels in a window centred on the pixel containing the location",
+        "window_pixels": [3, 3],
+        "window_km": 2.78,
+        "n_pixels_in_window": 9,
+        "max_valid_pixels": 9,
+        "tiles": ["h29v06"],
+        "n_items": 4,
+        "n_composites": 5,
+        "n_incomplete_composites": 1,
+    }
+    catalog = json.loads((tmp_path / "snap/catalog.json").read_text())
+    assert [(s["variable_id"], s["aggregation"]) for s in catalog["series"]] == [
+        ("modis_lst", "point")
+    ]
+    assert catalog["variables"][0]["unit"] == "K"
+
+
+def test_point_value_outside_valid_range_fails_only_the_point_series(tmp_path: Path):
+    raw = tmp_path / "raw" / "planetary_computer"
+    _pc_point_stats(
+        raw, "2020-01-01,taichung,LST_Day_1km,9,15000.0,1.0,1.0,1.0,9,h29v06,A.h29"
+    )
+
+    result = build_snapshot(
+        None,
+        tmp_path / "snap",
+        [LST_WITH_POINTS],
+        [TAICHUNG],
+        planetary_computer_dir=raw,
+        **RUN,
+    )
+
+    assert "超出合理範圍" in result.failures[("modis_lst", "taichung")]
+    assert not (tmp_path / "snap/series/modis_lst__taichung__point.json").exists()
+
+
+def test_point_composites_with_too_few_valid_pixels_are_left_out(tmp_path: Path):
+    raw = tmp_path / "raw" / "planetary_computer"
+    _pc_point_stats(
+        raw,
+        "2020-01-01,taichung,LST_Day_1km,9,300.0,1.0,298.0,302.0,9,h29v06,A.h29",
+        # 只剩 2 個像元（雲邊緣），而且值不合理：不採用，也不因此讓整個變數失敗
+        "2020-01-09,taichung,LST_Day_1km,2,266.0,1.0,265.0,267.0,9,h29v06,B.h29",
+        "2020-01-17,taichung,LST_Day_1km,3,302.0,1.0,301.0,303.0,9,h29v06,C.h29",
+    )
+    variable = {
+        **LST_WITH_POINTS,
+        "point_source": {**LST_WITH_POINTS["point_source"], "min_valid_pixels": 3},
+    }
+
+    result = build_snapshot(
+        None,
+        tmp_path / "snap",
+        [variable],
+        [TAICHUNG],
+        planetary_computer_dir=raw,
+        **RUN,
+    )
+
+    assert result.failures == {}
+    series = json.loads(
+        (tmp_path / "snap/series/modis_lst__taichung__point.json").read_text()
+    )
+    # (300 + 302) ÷ 2；coverage = (9/9 + 0 + 3/9) ÷ 3
+    assert series["points"] == [
+        {
+            "month": "2020-01-01",
+            "value": 301.0,
+            "n_samples": 2,
+            "coverage": pytest.approx(4 / 9),
+        }
+    ]
+    assert series["request"]["min_valid_pixels"] == 3
+    assert series["request"]["n_composites_below_min_valid_pixels"] == 1

@@ -11,6 +11,8 @@
     src_harmony      Harmony 區域平均的原始時間粒度
     src_nasa_power   NASA POWER 的原始鍵（含年平均鍵 YYYY13）
     src_noaa_ghcnh   測站當地日的日平均與觀測筆數（逐時原始值不收）
+    src_appeears     AppEEARS（MODIS）每個合成期的區域統計量：平均、標準差、像元數…
+    src_planetary_computer   Planetary Computer（MODIS）每個合成期的區域統計量，本機算出
 
 來源表都有 (variable_id, location_id)，可以對回 observations 與 series。
 公開 demo 只讀靜態 JSON，不讀這個檔；它是給隊員與評審用 SQL 查的。
@@ -23,10 +25,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from trend_detective import ghcnh
+from trend_detective import ghcnh, planetary_computer
 from trend_detective.giovanni import parse_timeseries_csv
 from trend_detective.harmony import parse_area_csv
-from trend_detective.snapshot import RAW_DIR, SNAPSHOT_DIR, STATION_UTC_OFFSET_HOURS
+from trend_detective.snapshot import (
+    RAW_DIR,
+    SNAPSHOT_DIR,
+    STATION_UTC_OFFSET_HOURS,
+    appeears_rows,
+)
 
 DB_PATH = Path("data/sqlite/trend_detective.sqlite")
 SOURCE_TABLES = {
@@ -34,6 +41,8 @@ SOURCE_TABLES = {
     "harmony": "src_harmony",
     "nasa_power": "src_nasa_power",
     "noaa_ghcnh": "src_noaa_ghcnh",
+    "appeears": "src_appeears",
+    "planetary_computer": "src_planetary_computer",
 }
 
 SCHEMA = """
@@ -83,6 +92,18 @@ CREATE TABLE src_noaa_ghcnh (
     local_date TEXT NOT NULL, mean_temp_c REAL, n_obs INTEGER,
     PRIMARY KEY (variable_id, location_id, local_date)
 );
+CREATE TABLE src_appeears (
+    variable_id TEXT NOT NULL, location_id TEXT NOT NULL, date TEXT NOT NULL,
+    dataset TEXT, pixel_count INTEGER, mean REAL, standard_deviation REAL,
+    minimum REAL, maximum REAL, median REAL,
+    PRIMARY KEY (variable_id, location_id, date)
+);
+CREATE TABLE src_planetary_computer (
+    variable_id TEXT NOT NULL, location_id TEXT NOT NULL, date TEXT NOT NULL,
+    asset TEXT, pixel_count INTEGER, mean REAL, standard_deviation REAL,
+    minimum REAL, maximum REAL, pixels_in_bbox INTEGER, tiles TEXT, item_ids TEXT,
+    PRIMARY KEY (variable_id, location_id, date)
+);
 CREATE INDEX observations_by_month ON observations(month);
 """
 
@@ -113,6 +134,10 @@ def build_database(snapshot_dir: Path, raw_dir: Path, db_path: Path) -> dict[str
         _insert_harmony(db, all_series, raw_dir / "harmony")
         _insert_power(db, all_series, raw_dir / "power")
         _insert_ghcnh(db, all_series, raw_dir / "ghcnh")
+        _insert_appeears(db, catalog, all_series, raw_dir / "appeears")
+        _insert_planetary_computer(
+            db, all_series, raw_dir / planetary_computer.SOURCE_DIR
+        )
         violations = db.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise ValueError(f"資料庫的外鍵對不上：{violations[:5]}")
@@ -347,6 +372,80 @@ def _insert_ghcnh(
                 for day, mean, n_obs in ghcnh.hourly_to_daily(
                     hourly, utc_offset_hours=offset
                 )
+            ],
+        )
+
+
+def _insert_appeears(
+    db: sqlite3.Connection,
+    catalog: dict[str, Any],
+    all_series: list[dict[str, Any]],
+    raw: Path,
+) -> None:
+    """每個合成期的區域統計量（平均、標準差、像元數…），原始時間粒度。"""
+    variables = {v["id"]: v for v in catalog["variables"]}
+    wanted = {(s["variable_id"], s["location_id"]) for s in _of(all_series, "appeears")}
+    for variable_id in sorted({key[0] for key in wanted}):
+        if not any((raw / variable_id).glob("*/submission.json")):
+            continue  # 這台機器沒有 AppEEARS 的原始檔：來源表留空
+        rows_by_region, _ = appeears_rows(raw / variable_id, variables[variable_id])
+        for location_id, rows in sorted(rows_by_region.items()):
+            if (variable_id, location_id) not in wanted:
+                continue
+            db.executemany(
+                "INSERT INTO src_appeears VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        variable_id,
+                        location_id,
+                        row.day.isoformat(),
+                        row.dataset,
+                        row.count,
+                        row.mean,
+                        row.standard_deviation,
+                        row.minimum,
+                        row.maximum,
+                        row.median,
+                    )
+                    for row in rows
+                ],
+            )
+
+
+def _insert_planetary_computer(
+    db: sqlite3.Connection, all_series: list[dict[str, Any]], raw: Path
+) -> None:
+    """每個合成期的區域統計量，以及用到的 tile 與 item（`stats.csv` 的內容）。"""
+    for s in _of(all_series, "planetary_computer"):
+        path = raw / s["variable_id"] / planetary_computer.STATS_FILE
+        if not path.exists():
+            continue  # 這台機器沒有原始統計檔：來源表留空
+
+        def number(text: str) -> float | None:
+            return float(text) if text else None
+
+        db.executemany(
+            "INSERT INTO src_planetary_computer VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    s["variable_id"],
+                    s["location_id"],
+                    row["date"],
+                    row["asset"],
+                    int(row["count"]),
+                    number(row["mean"]),
+                    number(row["standard_deviation"]),
+                    number(row["minimum"]),
+                    number(row["maximum"]),
+                    int(row["pixels_in_bbox"]),
+                    row["tiles"],
+                    row["item_ids"],
+                )
+                for (_, location_id), row in sorted(
+                    planetary_computer.read_stats(path).items()
+                )
+                if location_id == s["location_id"]
+                and row["asset"] == s["request"]["asset"]
             ],
         )
 

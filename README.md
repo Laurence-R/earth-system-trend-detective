@@ -44,9 +44,11 @@ cd <名稱> && scripts/sync-labels.sh
 | 來源 | 位置 | 內容 |
 |---|---|---|
 | AppEEARS（MODIS NDVI、LST） | `data/raw/appeears/<變數 id>/<task_id>/` | `submission.json`（task_id、送出時間、請求參數，不含憑證）、bundle 裡的統計 CSV 與請求 JSON；影像檔（`.nc`）不下載 |
+| Planetary Computer（MODIS LST、NDVI 的第二個取得管道） | `data/raw/planetary_computer/<變數 id>/` | `stats.csv`（每個合成期 × 區域的像元數、平均、標準差、最小、最大，以及用到的 tile 與 item id）、`fetch.json`（每次執行的時間、下載量、從檔案讀到的 scale factor 等）；影像檔不存，不含憑證 |
 
 | Giovanni（10 個變數 × 5 點位） | `data/raw/giovanni/<變數 id>__<地點 id>.csv` | `/timeseries` 的原始 CSV 回應 |
 | Harmony（區域平均） | `data/raw/harmony/<變數 id>__<區域 id>.csv`、`jobs.json` | 區域平均的結果 CSV 與 job 紀錄 |
+| 全球格點（MERRA-2 氣溫、GLDAS 表層土壤水） | `data/raw/grid/<變數 id>/` | `<變數 id>.nc`（時間 × 緯度 × 經度的月資料立方體，NetCDF-4）與 `months/` 下的逐月子集檔；repo 只收錄降解析度的衍生檔 `data/grid/<變數 id>/`，格式見 `AGENTS.md`「全球格點月資料」 |
 | NASA POWER（MERRA-2 氣溫） | `data/raw/power/<變數 id>__<地點 id>.json` | API 的原始 JSON 回應 |
 | NOAA GHCNh（測站氣溫） | `data/raw/ghcnh/GHCNh_<站號>_<年>.psv` | 逐時原始檔，約 100 MB；repo 只收錄月平均 |
 
@@ -58,7 +60,14 @@ uv run python -m trend_detective.appeears status    # 查狀態
 uv run python -m trend_detective.appeears download  # 完成後取回統計 CSV
 ```
 
-三個指令都要在存有 `data/raw/` 的那個目錄執行（或用 `--raw-dir`、`--env-file` 指過去）：送件紀錄只在那裡，換一個 worktree 直接跑 `submit` 會重送一批。
+MODIS 也可以不經 AppEEARS、不用帳號，直接從 Microsoft Planetary Computer 取：地表溫度 `modis_lst_pc`（與 AppEEARS 的 `modis_lst` 是同一個產品 MOD11A2.061）與植生綠度 `modis_ndvi_pc`（MOD13Q1.061，250 m、16 日；AppEEARS 的 `modis_ndvi` 是 1 km 月合成的 MOD13A3.061）。兩邊分開存，區域裁切方式不同，不要接成同一條線：
+
+```bash
+uv run python -m trend_detective.planetary_computer fetch              # 兩個變數共約 9 分鐘、下載約 1.5 GB；已算過的合成期不重抓
+uv run python -m trend_detective.snapshot --source planetary_computer  # 把 stats.csv 轉成區域月序列，不連網
+```
+
+AppEEARS 的三個指令都要在存有 `data/raw/` 的那個目錄執行（或用 `--raw-dir`、`--env-file` 指過去）：送件紀錄只在那裡，換一個 worktree 直接跑 `submit` 會重送一批。
 
 需要本機 `.env` 裡的 `APPEEARS_TOKEN`：用 Earthdata Login 帳密呼叫 AppEEARS 的 `POST /login` 取得，約 48 小時到期。AppEEARS 不接受 EDL 的 `EARTHDATA_TOKEN`（2026-11-14 實測回 403）。
 
@@ -87,6 +96,8 @@ uv run python -m trend_detective.sqlite_export
 | `src_harmony` | Harmony 區域平均的一筆原始值（月或日） | 追溯區域平均序列 |
 | `src_nasa_power` | NASA POWER 的一個原始鍵（含年平均 `YYYY13`） | 追溯 `power_t2m` |
 | `src_noaa_ghcnh` | 測站當地日的日平均與觀測筆數 | 追溯測站月均溫（不含逐時原始值） |
+| `src_appeears` | AppEEARS（MODIS）一個合成期的區域統計量：平均、標準差、像元數… | 追溯 `modis_ndvi`、`modis_lst` |
+| `src_planetary_computer` | Planetary Computer（MODIS）一個合成期的區域統計量，以及用到的 tile 與 item id | 追溯 `modis_lst_pc`、`modis_ndvi_pc` |
 
 來源表都有 `variable_id`、`location_id`，可以對回 `observations`。例如確認台中 2020-07 的臭氧月值是哪幾天平均出來的：
 
@@ -101,4 +112,4 @@ WHERE o.variable_id = 'omi_o3' AND o.location_id = 'taichung'
 -- 2020-07-01 | 275.383 | 275.383 | 23
 ```
 
-限制：單位沒有換算（`merra2_t2m` 是 K、`power_t2m` 是 C、`station_temp` 是 degC），跨變數比較要自己換算；MODIS（AppEEARS）的來源表還沒有，等統計 CSV 下載後再加。
+限制：單位沒有換算（`merra2_t2m` 是 K、`power_t2m` 是 C、`station_temp` 是 degC），跨變數比較要自己換算。
