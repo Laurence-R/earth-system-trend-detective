@@ -6,6 +6,8 @@ import {
   type TrendSummary,
 } from "./analysis/trends";
 import { CloseUpPanel } from "./closeup/CloseUpPanel";
+import { CompanionDock } from "./companions/CompanionDock";
+import { monthlyAnomaly } from "./companions/companionData";
 import { useAnalysisFile } from "./analysis/useAnalysisFile";
 import {
   trendArrowDirection,
@@ -214,6 +216,14 @@ function AppView({
           readings={readings}
           intensities={intensities}
           available={available}
+          anomalyZ={Object.fromEntries(
+            here.map((item) => [
+              item.variableId,
+              activeMonth
+                ? (monthlyAnomaly(item.points, activeMonth)?.z ?? null)
+                : null,
+            ]),
+          )}
           trends={trends}
           signals={signals}
         />
@@ -296,6 +306,16 @@ function AppView({
           .map((layer) => layer.id)}
         locationName={location?.nameEn ?? locationId}
         trends={trendsFile}
+      />
+      <CompanionDock
+        compact={strata.shown}
+        visibleIds={controls
+          .filter((layer) => layer.visible)
+          .map((layer) => layer.id)}
+        series={here}
+        locationId={locationId}
+        locationName={location?.nameEn ?? locationId}
+        trends={trendsFile.status === "ready" ? trendsFile.data : null}
       />
       <TrendMapLegend
         state={trendMap}

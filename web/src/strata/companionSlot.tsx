@@ -1,22 +1,15 @@
-// The one place the layer view gets its "data companion" from.
-//
-// ADAPTER: this is a placeholder (a labeled circle). Once the companions
-// (web/src/companions/) are merged, replace the body of CompanionSlot with
-//   <Companion variableId={variableId} value={value} anomalyZ={anomalyZ}
-//     trend={trend} significant={significant} size={size} />
-// (import { Companion } from "../companions/Companion") and delete
-// placeholderColor(). The props below already match that component. The
-// layer a companion stands on stays in strataSpec.ts; companionFor()'s
-// `layer` / `altitudeOrder` can be checked against it in a test.
-import { formColor } from "../forms/formColor";
-import { layerRegistry } from "../layers/registry";
+// The one place the layer view gets its "data companion" from: the original
+// characters of web/src/companions/. Which stratum a companion stands on
+// stays in strataSpec.ts (companionSpec.ts reads its `layer` and height
+// order from there, so there is one table).
+import { Companion } from "../companions/Companion";
 
 export type CompanionSlotProps = {
   variableId: string;
-  // Normalized reading of the month, 0..1 (0 when there is no data).
-  value: number;
-  // Standardized anomaly of the month; not available yet.
-  anomalyZ?: number;
+  // Normalized reading of the month, 0..1; null when the month has no data.
+  value: number | null;
+  // Standardized anomaly of the month against the same calendar month.
+  anomalyZ?: number | null;
   // +1 rising, -1 falling, 0 otherwise (trendArrowDirection).
   trend: number;
   significant: boolean;
@@ -24,26 +17,23 @@ export type CompanionSlotProps = {
   size: number;
 };
 
-function placeholderColor(variableId: string): string {
-  const layer = layerRegistry.find((item) => item.id === variableId);
-  return layer ? formColor(layer) : "#b7c6da";
-}
-
 export function CompanionSlot({
   variableId,
+  value,
+  anomalyZ,
   trend,
   significant,
   size,
 }: CompanionSlotProps) {
-  const color = placeholderColor(variableId);
-  const glyph = !significant ? "" : trend > 0 ? "▲" : trend < 0 ? "▼" : "";
   return (
-    <span
-      className="strata-companion-placeholder"
-      style={{ width: size, height: size, background: color }}
-      aria-hidden="true"
-    >
-      {glyph}
-    </span>
+    <Companion
+      variableId={variableId}
+      value={value}
+      anomalyZ={anomalyZ ?? null}
+      trend={trend}
+      significant={significant}
+      size={size}
+      showLabel={false}
+    />
   );
 }

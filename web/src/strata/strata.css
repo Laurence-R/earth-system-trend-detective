@@ -139,17 +139,6 @@
     0 0 3px #0b1220;
 }
 
-.strata-companion-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #0b1220;
-  font-size: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  border-radius: 50%;
-  box-shadow: 0 0 0 2px rgba(8, 14, 28, 0.7);
-}
-
 .strata-header {
   position: absolute;
   top: 104px;

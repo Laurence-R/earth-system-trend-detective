@@ -54,6 +54,8 @@ type StrataViewProps = {
   readings: Record<string, string>;
   intensities: Record<string, number>;
   available: Record<string, boolean>;
+  // Standardized anomaly of the month per variable (companions' posture).
+  anomalyZ?: Record<string, number | null>;
   trends?: Record<string, TrendSummary | null>;
   signals?: Record<string, TrendSignal>;
 };
@@ -74,6 +76,7 @@ export function StrataView({
   readings,
   intensities,
   available,
+  anomalyZ,
   trends,
   signals,
 }: StrataViewProps) {
@@ -234,12 +237,15 @@ export function StrataView({
             >
               <CompanionSlot
                 variableId={variableId}
-                value={intensities[variableId] ?? 0}
+                value={
+                  available[variableId] ? (intensities[variableId] ?? 0) : null
+                }
+                anomalyZ={anomalyZ?.[variableId] ?? null}
                 trend={trendArrowDirection(signal)}
                 significant={
                   signal?.state === "rising" || signal?.state === "falling"
                 }
-                size={26}
+                size={40}
               />
               <span>{info.name}</span>
             </button>
