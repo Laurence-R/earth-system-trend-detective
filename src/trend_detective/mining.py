@@ -43,12 +43,29 @@
    猜訓練期最多的類別、永遠猜測試期最多的類別（事後才知道）、猜「和目標自己前一個月的狀態
    一樣」（持續性）。變數篩選（3）用的是全期資料。
 
+6. 補值（#83、#85，`fill_gaps`，預設開）：寬表需要完整的月份，所以每條序列的距平先照清洗的
+   缺值政策補（`cleaning.fill_anomalies`）：連續缺不超過 `max_linear_gap_months` 個月線性內插，
+   更長的缺口補 0（月氣候值），序列頭尾不外推，不用前一個月的值帶入。補值比例超過
+   `max_fill_fraction` 的序列不放進表。補了多少記在各表的 `gap_filling`。補值會讓規則的交易數
+   與決策樹的可用列數變多，所以每次都另跑一次不補值的版本，比較寫在兩個結果檔的
+   `gap_filling_sensitivity`（規則數、前幾條規則是否相同、各折準確率與基準）。
+
+7. 分段距平（#85，`segment_known_steps`，預設關）：已查證有階梯的序列（`trends.json` 的
+   `known_issues` 裡有 `break_months` 的，例如 `gldas_tair` 的 2011-05、2017-07、2019-06 與
+   `gldas_evap` 的 2024-07、2025-06）在跳變月份切段，每段各自處理：段內可用月份不少於
+   `SEGMENT_MIN_TREND_MONTHS` 就減掉該段自己的線性趨勢，否則只減掉該段的平均；可用月份少於
+   `SEGMENT_MIN_MONTHS` 的段併入前一段。沒有階梯的序列照舊（整段一條直線）。決策樹每一折只用
+   訓練期估計各段，落在測試期的跳變月份無從估計，該折不切。每次都另跑一次相反設定，比較寫在
+   `segmentation_sensitivity`。預設關的理由：跳變月份是用全球陸地平均查證的，`gldas_tair` 在
+   台灣的格點實測是在別的月份跳（`docs/data/gldas-tair-check.md`），所以對台灣的序列照這些月份
+   切段沒有依據；開關留著給比較用。
+
 資料沒變時重跑，結果檔逐位元組相同（時間戳只在執行紀錄）。
 """
 
 import argparse
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -60,6 +77,7 @@ from mlxtend.frequent_patterns import fpgrowth
 from scipy import stats
 from sklearn.tree import DecisionTreeClassifier
 
+from trend_detective import cleaning
 from trend_detective.trends import (
     ANALYSIS_DIR,
     SNAPSHOT_DIR,
@@ -137,6 +155,13 @@ class MiningParams:
         ("gldas_tair", "merra2_t2m", "airs_tsurf", "power_t2m"),
     )
     tree_random_state: int = 0
+    # 缺值政策（#83）：寬表的距平先補值（短缺口線性內插、長缺口補月氣候值、頭尾不外推）
+    fill_gaps: bool = True
+    max_linear_gap_months: int = 2
+    # 補值比例超過這個值的序列不放進表
+    max_fill_fraction: float = 0.2
+    # 分段距平：有已知階梯的序列在跳變月份切段、每段各自去趨勢或去平均（見模組說明 7）
+    segment_known_steps: bool = False
 
 
 @dataclass(frozen=True)
@@ -150,6 +175,10 @@ class WideTable:
     variables: list[str]
     values: dict[str, dict[str, np.ndarray]]
     dropped_series: list[dict[str, str]]
+    # 每條序列在自己的全期間補了幾個月（`fill_gaps` 開的時候）：(地點, 變數) → 方法 → 月數
+    filled: dict[tuple[str, str], dict[str, int]] = field(default_factory=dict)
+    # 要切段的序列（`segment_known_steps` 開的時候）：(地點, 變數) → 各段起點的月序
+    breaks: dict[tuple[str, str], tuple[int, ...]] = field(default_factory=dict)
 
     @property
     def months(self) -> list[str]:
@@ -164,7 +193,10 @@ def build_table(
 ) -> WideTable:
     """從月距平組「地點 × 月份」寬表，期間是表內所有序列共同有資料的起訖月。"""
     aggregation = TABLE_AGGREGATION[kind]
+    known = (trends or {}).get("known_issues", {})
+    breaks: dict[tuple[str, str], tuple[int, ...]] = {}
     kept: dict[tuple[str, str], tuple[int, np.ndarray]] = {}
+    filled_cells: dict[tuple[str, str], np.ndarray] = {}
     dropped: list[dict[str, str]] = []
     for key in sorted(anomalies["series"]):
         series = anomalies["series"][key]
@@ -184,7 +216,37 @@ def build_table(
         values = np.array(
             [np.nan if v is None else v for v in series["values"]], dtype=float
         )
+        if params.fill_gaps:
+            values, methods = cleaning.fill_anomalies(
+                values, params.max_linear_gap_months
+            )
+            was_filled = np.array([method is not None for method in methods])
+            if values.size and was_filled.mean() > params.max_fill_fraction:
+                dropped.append(
+                    {
+                        "variable_id": variable,
+                        "location_id": location,
+                        "reason": "too_many_filled",
+                    }
+                )
+                continue
+            filled_cells[(location, variable)] = np.array(
+                [method or "" for method in methods]
+            )
         kept[(location, variable)] = (month_index(series["first_month"]), values)
+        if params.segment_known_steps:
+            months = sorted(
+                {
+                    month_index(month)
+                    for issue in (trends or {})
+                    .get("series", {})
+                    .get(key, {})
+                    .get("known_issues", [])
+                    for month in known.get(issue, {}).get("break_months", [])
+                }
+            )
+            if months:
+                breaks[(location, variable)] = tuple(months)
     if not kept:
         return WideTable(kind, 0, 0, [], [], {}, dropped)
     first = max(start for start, _ in kept.values())
@@ -195,7 +257,18 @@ def build_table(
     table: dict[str, dict[str, np.ndarray]] = {location: {} for location in locations}
     for (location, variable), (start, values) in kept.items():
         table[location][variable] = values[first - start : first - start + n_months]
-    return WideTable(kind, first, n_months, locations, variables, table, dropped)
+    # 補值只數落在表的共同期間內的月份
+    filled = {}
+    for key, methods in filled_cells.items():
+        start = kept[key][0]
+        inside = methods[first - start : first - start + n_months]
+        filled[key] = {
+            name: int((inside == name).sum())
+            for name in (cleaning.FILL_LINEAR, cleaning.FILL_CLIMATOLOGY)
+        }
+    return WideTable(
+        kind, first, n_months, locations, variables, table, dropped, filled, breaks
+    )
 
 
 def fit_trend(index: np.ndarray, values: np.ndarray) -> tuple[float, float, int]:
@@ -212,18 +285,78 @@ def fit_trend(index: np.ndarray, values: np.ndarray) -> tuple[float, float, int]
     return slope, float(values.mean() - slope * years.mean()), origin
 
 
-def detrend(index: np.ndarray, values: np.ndarray) -> np.ndarray:
-    """減掉用全部非缺值月份估計的線性趨勢；NaN 保持 NaN。"""
+# 分段距平的兩個門檻（見模組說明 7）
+SEGMENT_MIN_MONTHS = 3
+SEGMENT_MIN_TREND_MONTHS = 36
+
+
+def segments(
+    index: np.ndarray, estimable: np.ndarray, breaks: tuple[int, ...]
+) -> list[tuple[int, int]]:
+    """把序列在 `breaks`（月序）切成 (起點位置, 終點位置) 的段。
+
+    `estimable` 標出可以拿來估計的月份（有值；決策樹的一折裡還要在訓練期內）。可估計月份少於
+    `SEGMENT_MIN_MONTHS` 的段併入前一段（第一段不夠就併入下一段），所以落在序列之外、或落在
+    測試期的跳變月份不會切出新段。
+    """
+    cuts = sorted({int(b - index[0]) for b in breaks if index[0] < b <= index[-1]})
+    bounds = [0, *cuts, int(index.size)]
+    parts = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+    merged: list[tuple[int, int]] = []
+    for start, stop in parts:
+        if merged and int(estimable[start:stop].sum()) < SEGMENT_MIN_MONTHS:
+            merged[-1] = (merged[-1][0], stop)
+        else:
+            merged.append((start, stop))
+    if len(merged) > 1 and int(estimable[slice(*merged[0])].sum()) < SEGMENT_MIN_MONTHS:
+        merged[1] = (merged[0][0], merged[1][1])
+        merged.pop(0)
+    return merged
+
+
+def remove_segments(
+    index: np.ndarray,
+    values: np.ndarray,
+    estimable: np.ndarray,
+    breaks: tuple[int, ...],
+) -> np.ndarray:
+    """每段各自減掉線性趨勢（可估計月份夠多）或平均；估計只用 `estimable` 的月份。"""
+    out = values.copy()
+    for start, stop in segments(index, estimable, breaks):
+        part = np.zeros(values.size, dtype=bool)
+        part[start:stop] = True
+        used = part & estimable
+        if int(used.sum()) >= SEGMENT_MIN_TREND_MONTHS:
+            slope, intercept, origin = fit_trend(index[used], values[used])
+            out[part] = values[part] - (intercept + slope * (index[part] - origin) / 12)
+        elif used.any():
+            out[part] = values[part] - values[used].mean()
+    return out
+
+
+def detrend(
+    index: np.ndarray, values: np.ndarray, breaks: tuple[int, ...] = ()
+) -> np.ndarray:
+    """減掉用全部非缺值月份估計的線性趨勢；NaN 保持 NaN。`breaks` 有給時分段處理。"""
     valid = ~np.isnan(values)
+    if breaks:
+        return remove_segments(index, values, valid, breaks)
     slope, intercept, origin = fit_trend(index[valid], values[valid])
     return values - (intercept + slope * (index - origin) / 12)
 
 
-def fold_residuals(values: np.ndarray, first_index: int, train_stop: int) -> np.ndarray:
+def fold_residuals(
+    values: np.ndarray,
+    first_index: int,
+    train_stop: int,
+    breaks: tuple[int, ...] = (),
+) -> np.ndarray:
     """決策樹一折用的去趨勢距平：估計只用位置小於 `train_stop` 的月份（訓練期）。
 
     先把每個月份（1 至 12 月）減掉訓練期該月份的平均（輸入的距平是用全期平均算的，這一步
     改成只用訓練期），再減掉訓練期的線性趨勢。整條序列（含測試期）都套用同一組估計值。
+    `breaks` 有給時分段處理，各段也只用訓練期估計；訓練期月份不足的段（含整段落在測試期的）
+    併入前一段。
     """
     positions = np.arange(values.size)
     index = first_index + positions
@@ -233,16 +366,19 @@ def fold_residuals(values: np.ndarray, first_index: int, train_stop: int) -> np.
         month = index % 12 == calendar_month
         if (train & month).any():
             centred[month] -= values[train & month].mean()
+    if breaks:
+        return remove_segments(index, centred, train, breaks)
     slope, intercept, origin = fit_trend(index[train], centred[train])
     return centred - (intercept + slope * (index - origin) / 12)
 
 
 def detrend_table(table: WideTable) -> WideTable:
-    """每條序列各自去趨勢（用表內全期）。"""
+    """每條序列各自去趨勢（用表內全期）；有跳變月份的序列分段。"""
     index = table.first_index + np.arange(table.n_months)
     values = {
         location: {
-            variable: detrend(index, series) for variable, series in by_variable.items()
+            variable: detrend(index, series, table.breaks.get((location, variable), ()))
+            for variable, series in by_variable.items()
         }
         for location, by_variable in table.values.items()
     }
@@ -254,6 +390,8 @@ def detrend_table(table: WideTable) -> WideTable:
         table.variables,
         values,
         table.dropped_series,
+        table.filled,
+        table.breaks,
     )
 
 
@@ -569,6 +707,28 @@ def describe_table(table: WideTable) -> dict[str, Any]:
         "n_cells": cells * table.n_months,
         "n_missing_cells": missing,
         "dropped_series": table.dropped_series,
+        "gap_filling": {
+            "n_filled_linear": sum(
+                item[cleaning.FILL_LINEAR] for item in table.filled.values()
+            ),
+            "n_filled_climatology": sum(
+                item[cleaning.FILL_CLIMATOLOGY] for item in table.filled.values()
+            ),
+            "n_series_with_filled_months": sum(
+                any(item.values()) for item in table.filled.values()
+            ),
+        },
+        "segmentation": {
+            "n_series_segmented": len(table.breaks),
+            "series": [
+                {
+                    "variable_id": variable,
+                    "location_id": location,
+                    "break_months": [index_month(month) for month in months],
+                }
+                for (location, variable), months in sorted(table.breaks.items())
+            ],
+        },
     }
 
 
@@ -793,7 +953,12 @@ def run_decision_tree(
         for location in sorted(usable):
             # 趨勢、月份平均、目標門檻都只用這一折的訓練期（位置 < train_stop）估計
             residual = {
-                variable: fold_residuals(series, table.first_index, train_stop)
+                variable: fold_residuals(
+                    series,
+                    table.first_index,
+                    train_stop,
+                    table.breaks.get((location, variable), ()),
+                )
                 for variable, series in table.values[location].items()
                 if variable not in same_quantity
             }
@@ -938,6 +1103,10 @@ def run_decision_tree(
 
 
 COMMON_PARAMS = (
+    "segment_known_steps",
+    "fill_gaps",
+    "max_linear_gap_months",
+    "max_fill_fraction",
     "low_quantile",
     "high_quantile",
     "exclude_variables",
@@ -1006,6 +1175,107 @@ def _header(
     }
 
 
+GAP_FILLING_NOTE = (
+    "Gaps are filled on the monthly anomaly before the table is built: runs of up "
+    "to max_linear_gap_months missing months are linearly interpolated, longer "
+    "runs are set to 0 (the monthly climatology), nothing is extrapolated before "
+    "the first or after the last usable month of a series, and the previous "
+    "month is never carried forward. Series with more than max_fill_fraction of "
+    "their months filled are left out. gap_filling_sensitivity compares this "
+    "run with the same run without filling."
+)
+SENSITIVITY_TOP_RULES = 10
+
+
+def _rule_key(rule: dict[str, Any]) -> tuple[tuple[str, ...], str]:
+    return tuple(rule["antecedents"]), rule["consequent"]
+
+
+def compare_rules(
+    primary: dict[str, Any], other: dict[str, Any], names: tuple[str, str]
+) -> dict[str, Any]:
+    """同一張表、同一種時間設定的兩次探勘（`names` 是兩者的名字，前者是主要結果）。
+
+    比的是結果檔裡列出的規則（最多 `max_rules` 條，依 lift 排序）；`n_rules` 是總數。
+    """
+    first, second = names
+    listed = {name: run["rules"] for name, run in ((first, primary), (second, other))}
+    keys = {name: [_rule_key(rule) for rule in rules] for name, rules in listed.items()}
+    rank_other = {key: i + 1 for i, key in enumerate(keys[second])}
+    lift_other = {_rule_key(rule): rule["lift"] for rule in listed[second]}
+    top = listed[first][:SENSITIVITY_TOP_RULES]
+    top_other = keys[second][:SENSITIVITY_TOP_RULES]
+    return {
+        "n_transactions": {
+            first: primary["n_transactions"],
+            second: other["n_transactions"],
+        },
+        "n_candidate_rules": {
+            first: primary["n_candidate_rules"],
+            second: other["n_candidate_rules"],
+        },
+        "n_rules": {first: primary["n_rules"], second: other["n_rules"]},
+        "n_persistence_rules": {
+            first: primary["n_persistence_rules"],
+            second: other["n_persistence_rules"],
+        },
+        "n_listed_rules_in_both": len(set(keys[first]) & set(keys[second])),
+        f"n_listed_rules_only_{first}": len(set(keys[first]) - set(keys[second])),
+        f"n_listed_rules_only_{second}": len(set(keys[second]) - set(keys[first])),
+        "top_rules_compared": len(top),
+        "top_rules_same_set": set(keys[first][:SENSITIVITY_TOP_RULES])
+        == set(top_other),
+        "top_rules_same_order": keys[first][:SENSITIVITY_TOP_RULES] == top_other,
+        "top_rules": [
+            {
+                "antecedents": rule["antecedents"],
+                "consequent": rule["consequent"],
+                f"rank_{first}": i + 1,
+                f"rank_{second}": rank_other.get(_rule_key(rule)),
+                f"lift_{first}": rule["lift"],
+                f"lift_{second}": lift_other.get(_rule_key(rule)),
+            }
+            for i, rule in enumerate(top)
+        ],
+    }
+
+
+def tree_digest(tree: dict[str, Any]) -> dict[str, Any]:
+    """決策樹一次執行的精簡版：特徵、可用列數、各折的準確率與三種基準、彙總。"""
+    return {
+        "features": tree["features"],
+        "excluded_variables": [
+            item["variable_id"] for item in tree["excluded_variables"]
+        ],
+        "n_complete_rows": sum(
+            item["n_complete_rows"] for item in tree["rows_by_location"].values()
+        ),
+        "folds": [
+            {
+                "fold": fold["fold"],
+                "test_first_month": fold["test_first_month"],
+                "test_last_month": fold["test_last_month"],
+                "n_train": fold["n_train"],
+                "n_test": fold["n_test"],
+                "test_accuracy": fold["accuracy"]["test"],
+                "train_majority_accuracy": fold["baselines"]["train_majority"][
+                    "test_accuracy"
+                ],
+                "test_majority_accuracy": fold["baselines"]["test_majority"][
+                    "test_accuracy"
+                ],
+                "persistence_accuracy": fold["baselines"]["persistence"][
+                    "test_accuracy"
+                ],
+            }
+            for fold in tree["folds"]
+        ],
+        "summary": {
+            key: value for key, value in tree["summary"].items() if key != "text_en"
+        },
+    }
+
+
 def run(
     anomalies: dict[str, Any],
     trends: dict[str, Any] | None,
@@ -1015,17 +1285,121 @@ def run(
     """回傳 (fpgrowth, decision_tree) 兩個要寫出的結構。
 
     `variable_names` 是 id → 英文名，鍵的順序是排除近乎重複變數時的優先順序。
+
+    主要結果照 `params`；另外用相反的 `fill_gaps` 再跑一次，兩者的比較寫在
+    `gap_filling_sensitivity`（其餘參數完全相同）。
     """
     names = variable_names or {}
     priority = tuple(names)
+    other_params = replace(params, fill_gaps=not params.fill_gaps)
+    labels = ("filled", "unfilled") if params.fill_gaps else ("unfilled", "filled")
+    mined = run_fpgrowth(anomalies, trends, params, priority)
+    mined_other = run_fpgrowth(anomalies, trends, other_params, priority)
+    grown = run_decision_tree(anomalies, trends, params, priority)
+    grown_other = run_decision_tree(anomalies, trends, other_params, priority)
+    # 分段距平的敏感度：其餘參數相同，只切換 segment_known_steps
+    step_params = replace(params, segment_known_steps=not params.segment_known_steps)
+    step_labels = (
+        ("segmented", "unsegmented")
+        if params.segment_known_steps
+        else ("unsegmented", "segmented")
+    )
+    mined_step = run_fpgrowth(anomalies, trends, step_params, priority)
+    grown_step = run_decision_tree(anomalies, trends, step_params, priority)
+    step_note = (
+        f"The results in this file are the {step_labels[0]} run. The "
+        f"{step_labels[1]} run uses the same parameters with segment_known_steps "
+        "switched: series with verified step months (known_issues with "
+        "break_months) are cut at those months and each segment has its own "
+        f"linear trend removed (segments with at least {SEGMENT_MIN_TREND_MONTHS} "
+        "usable months) or its own mean (shorter segments); segments with fewer "
+        f"than {SEGMENT_MIN_MONTHS} usable months join the previous one. In the "
+        "decision tree each fold estimates the segments from its training months "
+        "only, so a step month inside the test months is not cut in that fold. "
+        "The step months were verified on the global land mean, not on the "
+        "Taiwan series used here."
+    )
+
+    def segmented_series(run: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+        return run["tables"][kind]["segmentation"]["series"]
+
+    sensitivity_note = (
+        f"The results in this file are the {labels[0]} run. The {labels[1]} run uses "
+        "the same parameters with fill_gaps switched."
+    )
     rules = {
         **_header(anomalies, params, FPGROWTH_PARAMS, names),
         "significance_note": SIGNIFICANCE_NOTE,
-        **run_fpgrowth(anomalies, trends, params, priority),
+        "gap_filling_note": GAP_FILLING_NOTE,
+        **mined,
+        "gap_filling_sensitivity": {
+            "note": sensitivity_note,
+            "primary": labels[0],
+            "compared_with": labels[1],
+            "tables": {
+                kind: {
+                    "variables": {
+                        labels[0]: table["variables"],
+                        labels[1]: mined_other["tables"][kind]["variables"],
+                    },
+                    "n_missing_cells": {
+                        labels[0]: table["n_missing_cells"],
+                        labels[1]: mined_other["tables"][kind]["n_missing_cells"],
+                    },
+                    **{
+                        timing: compare_rules(
+                            table[timing], mined_other["tables"][kind][timing], labels
+                        )
+                        for timing in ("same_month", "lagged_one_month")
+                    },
+                }
+                for kind, table in mined["tables"].items()
+            },
+        },
+        "segmentation_sensitivity": {
+            "note": step_note,
+            "primary": step_labels[0],
+            "compared_with": step_labels[1],
+            "tables": {
+                kind: {
+                    "segmented_series": segmented_series(
+                        mined if params.segment_known_steps else mined_step, kind
+                    ),
+                    "variables": {
+                        step_labels[0]: table["variables"],
+                        step_labels[1]: mined_step["tables"][kind]["variables"],
+                    },
+                    **{
+                        timing: compare_rules(
+                            table[timing],
+                            mined_step["tables"][kind][timing],
+                            step_labels,
+                        )
+                        for timing in ("same_month", "lagged_one_month")
+                    },
+                }
+                for kind, table in mined["tables"].items()
+            },
+        },
     }
     tree = {
         **_header(anomalies, params, TREE_PARAMS, names),
-        **run_decision_tree(anomalies, trends, params, priority),
+        "gap_filling_note": GAP_FILLING_NOTE,
+        **grown,
+        "gap_filling_sensitivity": {
+            "note": sensitivity_note,
+            "primary": labels[0],
+            "compared_with": labels[1],
+            labels[0]: tree_digest(grown),
+            labels[1]: tree_digest(grown_other),
+        },
+        "segmentation_sensitivity": {
+            "note": step_note,
+            "primary": step_labels[0],
+            "compared_with": step_labels[1],
+            step_labels[0]: tree_digest(grown),
+            step_labels[1]: tree_digest(grown_step),
+        },
     }
     return _round(rules), _round(tree)
 
@@ -1048,6 +1422,13 @@ def write_outputs(
                     "n_rules_same_month": table["same_month"]["n_rules"],
                     "n_rules_lagged_one_month": table["lagged_one_month"]["n_rules"],
                     "excluded_variables": table["excluded_variables"],
+                    "gap_filling": table["gap_filling"],
+                    "n_rules_other_run": {
+                        timing: rules["gap_filling_sensitivity"]["tables"][kind][
+                            timing
+                        ]["n_rules"]
+                        for timing in ("same_month", "lagged_one_month")
+                    },
                 }
                 for kind, table in rules["tables"].items()
             },
@@ -1154,6 +1535,20 @@ def main(argv: list[str] | None = None) -> int:
             "（給空字串表示沒有任何組）"
         ),
     )
+    parser.add_argument(
+        "--no-fill",
+        action="store_true",
+        help="主要結果不補值（預設補值；另一種做法的比較一律寫在 gap_filling_sensitivity）",
+    )
+    parser.add_argument(
+        "--segment-known-steps",
+        action="store_true",
+        help="主要結果用分段距平（預設不分段；比較一律寫在 segmentation_sensitivity）",
+    )
+    parser.add_argument(
+        "--max-linear-gap-months", type=int, default=d.max_linear_gap_months
+    )
+    parser.add_argument("--max-fill-fraction", type=float, default=d.max_fill_fraction)
     args = parser.parse_args(argv)
     params = MiningParams(
         low_quantile=args.low_quantile,
@@ -1174,6 +1569,10 @@ def main(argv: list[str] | None = None) -> int:
         rule_alpha=args.rule_alpha,
         max_rules=args.max_rules,
         max_itemsets=args.max_itemsets,
+        fill_gaps=not args.no_fill,
+        segment_known_steps=args.segment_known_steps,
+        max_linear_gap_months=args.max_linear_gap_months,
+        max_fill_fraction=args.max_fill_fraction,
         tree_table=args.tree_table,
         tree_target=args.tree_target,
         tree_max_depth=args.tree_max_depth,

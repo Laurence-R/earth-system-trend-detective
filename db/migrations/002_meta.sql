@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS meta.known_issues (
     summary_en text NOT NULL,
     source_doc text NOT NULL,
     issue_ref text,
+    break_months date[],       -- 已查證的跳變月份（新的一段從這個月開始）；探勘的分段距平用（#85）
     CHECK (variable_id IS NOT NULL OR variable_pattern IS NOT NULL)
 );
 

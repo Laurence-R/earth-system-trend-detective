@@ -44,6 +44,7 @@
       "period_end": null,
       "flag_months": false,
       "issue_ref": "#68",
+      "break_months": null,
       "n_series": 884
     },
     {
@@ -58,6 +59,7 @@
       "period_end": null,
       "flag_months": false,
       "issue_ref": "#68",
+      "break_months": null,
       "n_series": 832
     },
     {
@@ -72,6 +74,7 @@
       "period_end": null,
       "flag_months": false,
       "issue_ref": "#68",
+      "break_months": null,
       "n_series": 336
     },
     {
@@ -86,6 +89,7 @@
       "period_end": null,
       "flag_months": false,
       "issue_ref": "#68",
+      "break_months": null,
       "n_series": 26
     },
     {
@@ -100,6 +104,10 @@
       "period_end": "2025-06-01",
       "flag_months": true,
       "issue_ref": "#79",
+      "break_months": [
+        "2024-07-01",
+        "2025-06-01"
+      ],
       "n_series": 36
     },
     {
@@ -114,6 +122,7 @@
       "period_end": null,
       "flag_months": false,
       "issue_ref": "#79, #81",
+      "break_months": null,
       "n_series": 37
     },
     {
@@ -128,6 +137,9 @@
       "period_end": "2011-05-01",
       "flag_months": true,
       "issue_ref": "#74",
+      "break_months": [
+        "2011-05-01"
+      ],
       "n_series": 38
     },
     {
@@ -142,6 +154,9 @@
       "period_end": "2017-07-01",
       "flag_months": true,
       "issue_ref": "#74",
+      "break_months": [
+        "2017-07-01"
+      ],
       "n_series": 38
     },
     {
@@ -156,6 +171,9 @@
       "period_end": "2019-06-01",
       "flag_months": true,
       "issue_ref": "#74",
+      "break_months": [
+        "2019-06-01"
+      ],
       "n_series": 38
     },
     {
@@ -170,6 +188,7 @@
       "period_end": "2022-10-01",
       "flag_months": false,
       "issue_ref": "#4",
+      "break_months": null,
       "n_series": 5
     },
     {
@@ -184,6 +203,7 @@
       "period_end": "2025-11-01",
       "flag_months": false,
       "issue_ref": "#4",
+      "break_months": null,
       "n_series": 5
     },
     {
@@ -198,6 +218,7 @@
       "period_end": "2022-10-01",
       "flag_months": false,
       "issue_ref": "#4, #51",
+      "break_months": null,
       "n_series": 5
     },
     {
@@ -212,6 +233,7 @@
       "period_end": "2025-11-01",
       "flag_months": false,
       "issue_ref": "#4, #51",
+      "break_months": null,
       "n_series": 5
     }
   ],

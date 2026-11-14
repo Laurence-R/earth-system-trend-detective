@@ -53,6 +53,8 @@ clean     observations（逐月骨架：value_raw、value_clean、qc_flag、qc_f
 geo       locations（Point）  regions（Polygon）  grid_layers  grid_cells（Point + 斜率 + 顯著性）
           region_grid_trends（view）  region_grid_trend()  nearest_series()  nearest_cells()
 analysis  runs（每次執行：時間、git commit、參數 JSONB、影響列數 JSONB）
+          trends（每條序列的趨勢結果 + cleaning、known_issues、auxiliary）  significant_trends（view）
+          mining_runs（參數、摘要、補值與不補值的比較）  mining_rules  tree_folds
 ```
 
 定義在 `db/migrations/*.sql`（事實來源，可重跑）；`db/schema.sql` 是 `pg_dump --schema-only` 的結果，給人讀與比對用。
@@ -139,6 +141,8 @@ FROM meta.series s JOIN meta.variables v ON v.id = s.variable_id GROUP BY 1;
 | `missing_composites` | Planetary Computer 的 MODIS LST 缺合成期：2022-10 整月、2025-07-04 至 2025-11-17（`modis_lst_pc`，以及同樣從那裡讀的 `modis_lst` 點位序列） | 否（那些月份本來就是 `missing`） | `AGENTS.md` |
 | `auxiliary` | 輔助變數：AIRS 的 `_ct`（觀測筆數）、`_sdev`（標準差）、MERRA-2 的 `var_*`（變異數）、OMI 的太陽與觀測天頂角 | 否；`meta.variables.is_auxiliary`、`clean.series_summary.auxiliary` | `AGENTS.md` |
 
+`break_months`（#85）是已查證的跳變月份，只有兩筆 `discontinuity` 有：`gldas_tair` 的 2011-05、2017-07、2019-06 與 `gldas_evap` 的 2024-07、2025-06。資料探勘的「分段距平」敏感度比較用它切段（見 `AGENTS.md`「如何重產分析結果」）；清洗與趨勢統計不用它。
+
 數字都取自出處文件，沒有新的查證。階梯的月份只標那一個月，不代表之後的月份沒有受影響：階梯之後整段序列的水準都變了，旗標只是讓人查得到「這條序列在這裡有已知的跳變」。新查出的問題加在 seed，重跑 `load`、`clean`。
 
 ### 缺值政策
@@ -156,6 +160,42 @@ FROM meta.series s JOIN meta.variables v ON v.id = s.variable_id GROUP BY 1;
 - 資料庫：`clean.series_summary`（每條序列：總月數、各旗標數、補值數與方法、缺口數、最長缺口、補值比例、是否可進探勘、已知問題）。
 - 檔案：`data/analysis/cleaning.json`（進 git；規則、已知問題、全庫與各分組的彙總、核心 133 條的逐條摘要）加 `cleaning.run.json`（執行紀錄）。擴充序列的逐條摘要在 `data/extended/analysis/cleaning.json`（不進 git）。
 - 每次 `load`、`clean` 都寫一列 `analysis.runs`。
+
+## 趨勢與探勘的結果（#85）
+
+趨勢統計與資料探勘**不從資料庫讀**：`trends.py`、`mining.py` 對序列檔呼叫同一個清洗函式（`trend_detective.cleaning`），所以沒有這個容器的機器也能重現網站讀的 `data/analysis/*.json`。資料庫存的是同一份結果，方便和清洗表、空間表一起查：
+
+```bash
+uv run python -m trend_detective.trends          # 核心；擴充見 AGENTS.md「世界級趨勢」
+uv run python -m trend_detective.mining
+uv run python -m trend_detective.pg analysis     # 把結果檔寫回 analysis.*（整批換新）
+```
+
+- 兩條路徑一致的證據：測試（`tests/test_pg.py`）比對寫回後的可用月數與月距平；2026-11-15 實測 6,822 條序列的 `analysis.trends.n_valid` 全部等於 `clean.series_summary.n_usable`。
+- `load` 會清空 `analysis.*`（連同執行紀錄），重建後要再跑 `pg analysis`。只新增了 migration 時用 `pg migrate`，不清空。
+- 2026-11-15：`analysis.trends` 6,822 列（核心 133、擴充 6,689）、`analysis.mining_rules` 481 列、`analysis.tree_folds` 6 列（補值與不補值各 3 折）。
+
+```sql
+-- 顯著（FDR 校正後）、不是輔助變數、而且帶已知問題的趨勢
+SELECT variable_id, location_id, aggregation, slope_per_decade, ols_q, known_issues
+FROM analysis.significant_trends WHERE cardinality(known_issues) > 0 ORDER BY ols_q;
+
+-- 顯著趨勢裡，被標成離群的月份最多的序列
+SELECT variable_id, location_id, (cleaning->>'n_outlier_suspect')::int AS n_outliers
+FROM analysis.significant_trends ORDER BY 3 DESC LIMIT 10;
+
+-- 決策樹：補值與不補值各折的準確率與基準
+SELECT variant, fold, n_test, test_accuracy, train_majority_accuracy,
+       test_majority_accuracy, persistence_accuracy
+FROM analysis.tree_folds ORDER BY fold, variant;
+
+-- 左邊含某個項目的規則（text[] 的 GIN 索引）
+SELECT table_kind, timing, antecedents, consequent, lift, q
+FROM analysis.mining_rules WHERE antecedents @> ARRAY['gldas_tair=high'] ORDER BY lift DESC;
+
+-- 每次執行的參數
+SELECT run_id, step, finished_at, git_commit, parameters->'parameters' FROM analysis.runs ORDER BY 1;
+```
 
 ## 範例查詢
 
