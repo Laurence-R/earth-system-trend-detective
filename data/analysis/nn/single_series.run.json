@@ -1,0 +1,8 @@
+{
+  "command": "uv run python -m trend_detective.nn.single_series",
+  "generated_at": "2026-11-15T07:34:45Z",
+  "exploratory": true,
+  "holdout_evaluated_once": true,
+  "n_series": 180,
+  "pretrained_model": null
+}
