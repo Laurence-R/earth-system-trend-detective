@@ -1,0 +1,8 @@
+{
+  "command": "uv run python -m trend_detective.nn.baselines",
+  "generated_at": "2026-11-15T06:51:38Z",
+  "exploratory": true,
+  "holdout_evaluated_once": true,
+  "n_series": 180,
+  "output": "data/analysis/nn/baselines.json"
+}
